@@ -26,6 +26,7 @@
  # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  **************************************************************************/
 #include "ReSTIR_DI.h"
+#include <algorithm>
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
 {
@@ -91,6 +92,9 @@ void ReSTIR_DI::recreatePrograms()
     mpVisibilityPass = nullptr;
 }
 
+/**
+ * @brief
+ */
 void ReSTIR_DI::prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount)
 {
     const uint32_t pixelCount = mFrameDim.x * mFrameDim.y;
@@ -106,16 +110,98 @@ void ReSTIR_DI::prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount)
     const uint32_t aliasCount = std::max(lightCount, 1u);
     if (aliasCount != mAliasElementCount || !mpAliasProbBuffer || !mpAliasIndexBuffer)
     {
-        std::vector<float> probs(aliasCount, 1.f);
-        std::vector<uint32_t> indices(aliasCount, 0u);
-        for (uint32_t i = 0; i < aliasCount; ++i) indices[i] = i;
-
         mAliasElementCount = aliasCount;
-        mpAliasProbBuffer = mpDevice->createTypedBuffer<float>(aliasCount, ResourceBindFlags::ShaderResource, MemoryType::DeviceLocal, probs.data());
-        mpAliasIndexBuffer = mpDevice->createTypedBuffer<uint32_t>(aliasCount, ResourceBindFlags::ShaderResource, MemoryType::DeviceLocal, indices.data());
+        mpAliasProbBuffer = mpDevice->createTypedBuffer<float>(aliasCount, ResourceBindFlags::ShaderResource, MemoryType::DeviceLocal, nullptr);
+        mpAliasIndexBuffer = mpDevice->createTypedBuffer<uint32_t>(aliasCount, ResourceBindFlags::ShaderResource, MemoryType::DeviceLocal, nullptr);
         mpAliasProbBuffer->setName("ReSTIR_DI::AliasProb");
         mpAliasIndexBuffer->setName("ReSTIR_DI::AliasIndex");
     }
+}
+
+/**
+ * @brief 根据flux构建发光三角形列表的Alias表
+ */
+void ReSTIR_DI::updateAliasTable(RenderContext* pRenderContext, const ref<LightCollection>& pLights, uint32_t lightCount)
+{
+    const uint32_t aliasCount = std::max(lightCount, 1u);
+    std::vector<float> probs(aliasCount, 1.f);
+    std::vector<uint32_t> indices(aliasCount, 0u);
+
+    if (lightCount > 0 && pLights)
+    {
+        pLights->prepareSyncCPUData(pRenderContext);
+        const auto& triangles = pLights->getMeshLightTriangles(pRenderContext);
+        const uint32_t triCount = lightCount;
+
+        std::vector<float> weights(lightCount, 0.f);
+        float sumWeight = 0.f;
+        for (uint32_t i = 0; i < triCount; ++i)
+        {
+            const float w = std::max(0.f, triangles[i].flux);
+            weights[i] = w;
+            sumWeight += w;
+            indices[i] = i;
+        }
+
+        if (sumWeight > 0.f)
+        {
+            std::vector<float> scaled(lightCount);
+            std::vector<uint32_t> small;
+            std::vector<uint32_t> large;
+            small.reserve(lightCount);
+            large.reserve(lightCount);
+
+            const float scale = (float)lightCount / sumWeight;
+            for (uint32_t i = 0; i < lightCount; ++i)
+            {
+                scaled[i] = weights[i] * scale;
+                if (scaled[i] < 1.f)
+                    small.push_back(i);
+                else
+                    large.push_back(i);
+            }
+
+            while (!small.empty() && !large.empty())
+            {
+                const uint32_t s = small.back();
+                small.pop_back();
+                const uint32_t l = large.back();
+
+                probs[s] = std::clamp(scaled[s], 0.f, 1.f);
+                indices[s] = l;
+
+                scaled[l] = (scaled[l] + scaled[s]) - 1.f;
+                if (scaled[l] < 1.f)
+                {
+                    large.pop_back();
+                    small.push_back(l);
+                }
+            }
+
+            for (uint32_t i : large)
+            {
+                probs[i] = 1.f;
+                indices[i] = i;
+            }
+            for (uint32_t i : small)
+            {
+                probs[i] = 1.f;
+                indices[i] = i;
+            }
+        }
+        else
+        {
+            for (uint32_t i = 0; i < lightCount; ++i)
+            {
+                probs[i] = 1.f;
+                indices[i] = i;
+            }
+        }
+    }
+
+    FALCOR_ASSERT(mpAliasProbBuffer && mpAliasIndexBuffer);
+    mpAliasProbBuffer->setBlob(probs.data(), 0, sizeof(float) * aliasCount);
+    mpAliasIndexBuffer->setBlob(indices.data(), 0, sizeof(uint32_t) * aliasCount);
 }
 
 void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderData)
@@ -176,15 +262,20 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
         cb["gFrameIndex"] = mFrameIndex;
     };
 
-    const uint32_t lightCount = pLights ? pLights->getTotalLightCount() : 0u;
+    uint32_t lightCount = 0u;
+    if (pLights)
+    {
+        pLights->prepareSyncCPUData(pRenderContext);
+        lightCount = (uint32_t)pLights->getMeshLightTriangles(pRenderContext).size();
+    }
     prepareBuffers(mpInitPass->getRootVar(), lightCount);
+    updateAliasTable(pRenderContext, pLights, lightCount);
 
     bindCommonVars(mpInitPass);
     mpInitPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
 
     bindCommonVars(mpVisibilityPass);
     mpVisibilityPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
-
     std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
     mFrameIndex++;
 }

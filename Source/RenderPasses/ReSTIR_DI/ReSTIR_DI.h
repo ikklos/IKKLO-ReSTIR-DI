@@ -55,6 +55,7 @@ public:
 private:
     void recreatePrograms();
     void prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount);
+    void updateAliasTable(RenderContext* pRenderContext, const ref<LightCollection>& pLights, uint32_t lightCount);
 
     ref<Scene> mpScene;
     ref<ComputePass> mpInitPass;
