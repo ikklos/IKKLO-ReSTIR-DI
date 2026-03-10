@@ -14,6 +14,7 @@ import Utils.Math.Ray;
 cbuffer CB{
     uint gRIS_M;
     float2 gFrameDim;
+    uint gFrameIndex;
 }
 struct Reservoir
 {
@@ -72,6 +73,26 @@ float2 rand2(inout uint state)
 {
     return float2(rand01(state), rand01(state));
 }
+
+// Small integer hash mixer for RNG seed initialization.
+uint hash32(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+uint initRandomSeed(uint2 pixel, uint frameIndex)
+{
+    uint seed = 0x9e3779b9u;
+    seed ^= hash32(pixel.x + 0x68bc21ebu);
+    seed ^= hash32(pixel.y + 0x02e5be93u);
+    seed ^= hash32(frameIndex + 0x967a889bu);
+    return max(hash32(seed), 1u);
+}
 // =========================================================================================
 // 从Vbuffer中解压出surf信息
 // =========================================================================================
@@ -115,14 +136,13 @@ Surface DecodeSurfaceFromHit(const float3 orig, const float3 dir, const HitInfo 
         break;
     }
     default:
-        return s; // miss/none -> invalid
+        return s;
     }
 
     // 2) 生成 ShadingData
     const ShadingData sd = gScene.materials.prepareShadingData(v, materialID, -dir);
 
     // 3) 取材质属性（albedo/roughness 等）
-    //    这里用 SceneDebugger 同款的方式取 properties
     let lod = ExplicitLodTextureSampler(0.f);
     let mi = gScene.materials.getMaterialInstance(sd, lod);
     let props = mi.getProperties(sd);
@@ -130,19 +150,9 @@ Surface DecodeSurfaceFromHit(const float3 orig, const float3 dir, const HitInfo 
     // 4) 填充 Surface
     s.posW = sd.posW;
 
-    // 法线选择：
-    // - sd.frame.N : shading normal（含法线贴图，更符合“看起来”的材质）
-    // - sd.faceN   : 几何法线（更稳定，某些情况下更不易出奇怪的G项/噪声）
     s.nrmW = sd.frame.N;
-
-    // Falcor 的 sd.V 就是 view vector（从表面指向观察者/相机方向）
     s.woW = sd.V;
-
-    // 反射率（diffuse 反射部分的 albedo）
-    // 如果你要“baseColor”也可以用其它字段，但 DI 常用 diffuseReflectionAlbedo
     s.albedo = props.diffuseReflectionAlbedo;
-
-    // 粗糙度（通常就是 props.roughness）
     s.rough = props.roughness;
 
     s.valid = 1;
@@ -183,6 +193,12 @@ float Calcw(Surface surf, uint triLightID, float2 bary) {
     ph = ph * CalcG(surf, tri, bary);
     return ph / p;
 }
+
+float3 EvalLightSamplePosW(EmissiveTriangle tri, float2 bary)
+{
+    float b0 = 1.f - bary.x - bary.y;
+    return tri.posW[0] * b0 + tri.posW[1] * bary.x + tri.posW[2] * bary.y;
+}
 // ====================================
 // Stage 1
 // Generate initial candidates
@@ -191,9 +207,17 @@ float Calcw(Surface surf, uint triLightID, float2 bary) {
 void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID) {
     static const int kMaxSampleCount = 64;
     uint2 pixel = dispatchThreadId.xy;
+    if (pixel.x >= gFrameDim.x || pixel.y >= gFrameDim.y) {
+        return;
+    }
     int n = clamp(gRIS_M, 0, kMaxSampleCount);
     uint lightCount = gScene.lightCollection.getTriangleCount();
-    uint randomState = 2323829u;
+    uint randomState = initRandomSeed(pixel, gFrameIndex);
+    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    if (lightCount == 0 || n == 0) {
+        gReservoir[pixelIndex] = Reservoir();
+        return;
+    }
     //get surface
     HitInfo hit = unpackHitInfo(vbuffer[pixel]);
     const Ray ray = gScene.camera.computeRayPinhole(pixel, (uint2)gFrameDim);
@@ -201,31 +225,37 @@ void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID) {
     // ===========================
     // RIS
     // ===========================
-    Reservoir r;
-    [unroll]
-    for(int i = 0; i < kMaxSampleCount; ++i){
-        if(i < n){
-            //samp triangle
-            uint p = (uint)(rand01(randomState) * lightCount);
-            if(rand01(randomState) > gAliasProb[p]){
-                p = gAliasIndex[p];
+    Reservoir r = Reservoir();
+    if (surf.valid != 0) {
+        [unroll]
+        for (int i = 0; i < kMaxSampleCount; ++i) {
+            if (i < n) {
+                // samp triangle
+                uint p = (uint)(rand01(randomState) * lightCount);
+                if (rand01(randomState) > gAliasProb[p]) {
+                    p = gAliasIndex[p];
+                }
+                // samp point on triangle
+                float2 u = rand2(randomState);
+                float su0 = sqrt(u.x);
+                float s1 = su0 * (1.0 - u.y);
+                float s2 = su0 * u.y;
+                float2 bary = float2(s1, s2);
+                float wi = Calcw(surf, p, bary);
+                r.update(p, bary, wi, randomState);
             }
-            //samp point on triangle
-            float2 u = rand2(randomState);
-            float s0 = sqrt(u.x);
-            float s1 = u.x * (1.0 - u.y);
-            float s2 = u.x * u.y;
-            s0 = 1 - s0;
-            float2 bary = float2(s1, s2);
-            float wi = Calcw(surf, p, bary);
-            r.update(p, bary, wi, randomState);
+        }
+        // calc W
+        EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
+        float ph = luminance(CalcBRDF(surf) * CalcLe(tri, r.bary));
+        ph = ph * CalcG(surf, tri, r.bary);
+        if (r.M > 0 && ph > 0.f) {
+            r.W = r.wsum / (float)r.M / ph;
+        } else {
+            r.W = 0.f;
         }
     }
-    // calc W
-    EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
-    float ph = luminance(CalcBRDF(surf) * CalcLe(tri, r.bary));
-    ph = ph * CalcG(surf, tri, r.bary);
-    r.W = r.wsum / r.M / ph;
+    gReservoir[pixelIndex] = r;
 }
 // ============================
 // stage 2
@@ -233,9 +263,45 @@ void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID) {
 // ============================
 [numthreads(16,16,1)]
 void ReSTIR_Visibility(uint3 dispatchThreadId: SV_DispatchThreadID) {
-    //get surf
     uint2 pixel = dispatchThreadId.xy;
-    HitInfo hit = unpackHitInfo(vbuffer[pixel]);
-    gScene.camera.computeRayPinhole(pixel, (uint2)gFrameDim);
+    if (pixel.x >= gFrameDim.x || pixel.y >= gFrameDim.y) {
+        return;
+    }
 
+    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    Reservoir r = gReservoir[pixelIndex];
+    if (r.M == 0 || r.W <= 0.f) {
+        return;
+    }
+
+    HitInfo hit = unpackHitInfo(vbuffer[pixel]);
+    const Ray cameraRay = gScene.camera.computeRayPinhole(pixel, (uint2)gFrameDim);
+    Surface surf = DecodeSurfaceFromHit(cameraRay.origin, cameraRay.dir, hit);
+    if (surf.valid == 0) {
+        gReservoir[pixelIndex] = Reservoir();
+        return;
+    }
+
+    EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
+    float3 lightPosW = EvalLightSamplePosW(tri, r.bary);
+    float3 toLight = lightPosW - surf.posW;
+    float dist = length(toLight);
+    if (dist <= 1e-4f) {
+        r.W = 0.f;
+        r.wsum = 0.f;
+        gReservoir[pixelIndex] = r;
+        return;
+    }
+
+    float3 dir = toLight / dist;
+    float3 origin = surf.posW + surf.nrmW * 1e-3f;
+    float tMax = max(dist - 2e-3f, 0.f);
+
+    SceneRayQuery<1> rayQuery;
+    bool visible = (tMax > 0.f) && rayQuery.traceVisibilityRay(Ray(origin, dir, 0.f, tMax));
+    if (!visible) {
+        r.W = 0.f;
+        r.wsum = 0.f;
+        gReservoir[pixelIndex] = r;
+    }
 }

@@ -45,15 +45,29 @@ public:
 
     virtual Properties getProperties() const override;
     virtual RenderPassReflection reflect(const CompileData& compileData) override;
-    virtual void compile(RenderContext* pRenderContext, const CompileData& compileData) override {}
+    virtual void compile(RenderContext* pRenderContext, const CompileData& compileData) override;
     virtual void execute(RenderContext* pRenderContext, const RenderData& renderData) override;
     virtual void renderUI(Gui::Widgets& widget) override;
-    virtual void setScene(RenderContext* pRenderContext, const ref<Scene>& pScene) override { mpScene = pScene;
-    }
+    virtual void setScene(RenderContext* pRenderContext, const ref<Scene>& pScene) override;
     virtual bool onMouseEvent(const MouseEvent& mouseEvent) override { return false; }
     virtual bool onKeyEvent(const KeyboardEvent& keyEvent) override { return false; }
 
 private:
+    void recreatePrograms();
+    void prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount);
+
     ref<Scene> mpScene;
-    ref<Buffer> mpLightMeshDataBuffer;
+    ref<ComputePass> mpInitPass;
+    ref<ComputePass> mpVisibilityPass;
+
+    ref<Buffer> mpReservoirBuffer;
+    ref<Buffer> mpPrevReservoirBuffer;
+    ref<Buffer> mpAliasProbBuffer;
+    ref<Buffer> mpAliasIndexBuffer;
+
+    uint2 mFrameDim = uint2(0, 0);
+    uint32_t mFrameIndex = 0;
+    uint32_t mRISSampleCount = 8;
+    uint32_t mReservoirElementCount = 0;
+    uint32_t mAliasElementCount = 0;
 };
