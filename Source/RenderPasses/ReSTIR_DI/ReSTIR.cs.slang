@@ -45,12 +45,14 @@ struct Surface
 //蓄水池
 RWStructuredBuffer<Reservoir> gReservoir;
 StructuredBuffer<Reservoir> gPrevReservoir;
+RWStructuredBuffer<Surface> gSurfaceData;
 
 //Alias Table
 StructuredBuffer<float> gAliasProb;
 StructuredBuffer<uint> gAliasIndex;
 //输入纹理
 Texture2D<PackedHitInfo> vbuffer;
+Texture2D<float2> mvec;
 
 // ===============
 // 随机数生成
@@ -85,18 +87,19 @@ uint hash32(uint x)
     return x;
 }
 
-uint initRandomSeed(uint2 pixel, uint frameIndex)
+uint initRandomSeed(uint2 pixel, uint frameIndex, uint stage)
 {
     uint seed = 0x9e3779b9u;
     seed ^= hash32(pixel.x + 0x68bc21ebu);
     seed ^= hash32(pixel.y + 0x02e5be93u);
     seed ^= hash32(frameIndex + 0x967a889bu);
+    seed ^= hash32(stage + 0x8e22a938u);
     return max(hash32(seed), 1u);
 }
 // =========================================================================================
-// 从Vbuffer中解压出surf信息
+// 从Vbuffer中解压出surf信息（不依赖主射线重建）
 // =========================================================================================
-Surface DecodeSurfaceFromHit(const float3 orig, const float3 dir, const HitInfo hit)
+Surface DecodeSurfaceFromHit(const HitInfo hit)
 {
     Surface s = {};
     s.valid = 0;
@@ -116,9 +119,16 @@ Surface DecodeSurfaceFromHit(const float3 orig, const float3 dir, const HitInfo 
     }
     case HitType::DisplacedTriangle:
     {
+        // Approximate view direction for displaced geometry.
         const DisplacedTriangleHit dh = hit.getDisplacedTriangleHit();
         materialID = gScene.getMaterialID(dh.instanceID);
-        v = gScene.getVertexData(dh, -dir);
+        float3 approxViewDir = gScene.camera.data.target - gScene.camera.data.posW;
+        if (dot(approxViewDir, approxViewDir) > 1e-12f) {
+            approxViewDir = normalize(approxViewDir);
+        } else {
+            approxViewDir = float3(0.f, 0.f, -1.f);
+        }
+        v = gScene.getVertexData(dh, approxViewDir);
         break;
     }
     case HitType::Curve:
@@ -130,17 +140,23 @@ Surface DecodeSurfaceFromHit(const float3 orig, const float3 dir, const HitInfo 
     }
     case HitType::SDFGrid:
     {
-        const SDFGridHit sh = hit.getSDFGridHit();
-        materialID = gScene.getMaterialID(sh.instanceID);
-        v = gScene.getVertexDataFromSDFGrid(sh, orig, dir);
-        break;
+        // SDF grid vertex reconstruction requires ray origin/direction.
+        // Skip for this lightweight path.
+        return s;
     }
     default:
         return s;
     }
 
+    float3 viewDir = gScene.camera.data.posW - v.posW;
+    if (dot(viewDir, viewDir) > 1e-12f) {
+        viewDir = normalize(viewDir);
+    } else {
+        viewDir = float3(0.f, 0.f, 1.f);
+    }
+
     // 2) 生成 ShadingData
-    const ShadingData sd = gScene.materials.prepareShadingData(v, materialID, -dir);
+    const ShadingData sd = gScene.materials.prepareShadingData(v, materialID, viewDir);
 
     // 3) 取材质属性（albedo/roughness 等）
     let lod = ExplicitLodTextureSampler(0.f);
@@ -212,16 +228,19 @@ void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID) {
     }
     int n = clamp(gRIS_M, 0, kMaxSampleCount);
     uint lightCount = gScene.lightCollection.getTriangleCount();
-    uint randomState = initRandomSeed(pixel, gFrameIndex);
+    uint randomState = initRandomSeed(pixel, gFrameIndex,1);
     uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
     if (lightCount == 0 || n == 0) {
+        HitInfo hit0 = unpackHitInfo(vbuffer[pixel]);
+        Surface surf0 = DecodeSurfaceFromHit(hit0);
+        gSurfaceData[pixelIndex] = surf0;
         gReservoir[pixelIndex] = Reservoir();
         return;
     }
     //get surface
     HitInfo hit = unpackHitInfo(vbuffer[pixel]);
-    const Ray ray = gScene.camera.computeRayPinhole(pixel, (uint2)gFrameDim);
-    Surface surf = DecodeSurfaceFromHit(ray.origin, ray.dir, hit);
+    Surface surf = DecodeSurfaceFromHit(hit);
+    gSurfaceData[pixelIndex] = surf;
     // ===========================
     // RIS
     // ===========================
@@ -274,9 +293,7 @@ void ReSTIR_Visibility(uint3 dispatchThreadId: SV_DispatchThreadID) {
         return;
     }
 
-    HitInfo hit = unpackHitInfo(vbuffer[pixel]);
-    const Ray cameraRay = gScene.camera.computeRayPinhole(pixel, (uint2)gFrameDim);
-    Surface surf = DecodeSurfaceFromHit(cameraRay.origin, cameraRay.dir, hit);
+    Surface surf = gSurfaceData[pixelIndex];
     if (surf.valid == 0) {
         gReservoir[pixelIndex] = Reservoir();
         return;
@@ -304,4 +321,79 @@ void ReSTIR_Visibility(uint3 dispatchThreadId: SV_DispatchThreadID) {
         r.wsum = 0.f;
         gReservoir[pixelIndex] = r;
     }
+}
+uint2 getPrevPixel(uint2 pixel) {
+    float2 curr = float2(pixel) + 0.5f;
+    float2 motion = mvec[pixel];
+    float2 prev = curr + motion * gFrameDim;
+    int2 prevPix = int2(floor(prev));
+
+    if (prevPix.x < 0 || prevPix.y < 0 || prevPix.x >= (int)gFrameDim.x || prevPix.y >= (int)gFrameDim.y) {
+        return pixel;
+    }
+    return uint2(prevPix);
+}
+Reservoir CombineReservoirs(uint2 pixel, Reservoir r1, Reservoir r2, uint state) {
+    Reservoir s = Reservoir();
+    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    Surface surf = gSurfaceData[pixelIndex];
+
+    if (surf.valid == 0) {
+        return s;
+    }
+
+    if (r1.M > 0 && r1.W > 0.f)
+    {
+        EmissiveTriangle tri1 = gScene.lightCollection.getTriangle(r1.lightID);
+        float ph1 = luminance(CalcBRDF(surf) * CalcLe(tri1, r1.bary));
+        ph1 *= CalcG(surf, tri1, r1.bary);
+        float w1 = ph1 * (float)r1.M * r1.W;
+        if (w1 > 0.f) s.update(r1.lightID, r1.bary, w1, state);
+    }
+
+    if (r2.M > 0 && r2.W > 0.f)
+    {
+        EmissiveTriangle tri2 = gScene.lightCollection.getTriangle(r2.lightID);
+        float ph2 = luminance(CalcBRDF(surf) * CalcLe(tri2, r2.bary));
+        ph2 *= CalcG(surf, tri2, r2.bary);
+        float w2 = ph2 * (float)r2.M * r2.W;
+        if (w2 > 0.f) s.update(r2.lightID, r2.bary, w2, state);
+    }
+
+    s.M = r1.M + r2.M;
+    if (s.M == 0 || s.wsum <= 0.f) {
+        s.W = 0.f;
+        return s;
+    }
+
+    EmissiveTriangle triS = gScene.lightCollection.getTriangle(s.lightID);
+    float phS = luminance(CalcBRDF(surf) * CalcLe(triS, s.bary));
+    phS *= CalcG(surf, triS, s.bary);
+    if (phS > 0.f) {
+        s.W = s.wsum / ((float)s.M * phS);
+    } else {
+        s.W = 0.f;
+    }
+
+    return s;
+}
+// =================
+// stage 3
+// =================
+[numthreads(16, 16, 1)]
+void ReSTIR_TemporalReuse(uint3 dispatchThreadId: SV_DispatchThreadID) {
+    uint2 pixel = dispatchThreadId.xy;
+    if (pixel.x >= gFrameDim.x || pixel.y >= gFrameDim.y) {
+        return;
+    }
+    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    // get prev pixel
+    uint2 prevP = getPrevPixel(pixel);
+    uint prevPixelIndex = prevP.y * (uint)gFrameDim.x + prevP.x;
+    // random seed
+    uint randomState = initRandomSeed(pixel, gFrameIndex, 3);
+    // update
+    gReservoir[pixelIndex] = CombineReservoirs(pixel, gReservoir[pixelIndex],
+         gPrevReservoir[prevPixelIndex], randomState);
+
 }

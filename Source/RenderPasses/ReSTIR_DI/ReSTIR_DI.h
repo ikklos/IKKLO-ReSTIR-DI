@@ -60,9 +60,11 @@ private:
     ref<Scene> mpScene;
     ref<ComputePass> mpInitPass;
     ref<ComputePass> mpVisibilityPass;
+    ref<ComputePass> mpTemporalPass;
 
     ref<Buffer> mpReservoirBuffer;
     ref<Buffer> mpPrevReservoirBuffer;
+    ref<Buffer> mpSurfaceBuffer;
     ref<Buffer> mpAliasProbBuffer;
     ref<Buffer> mpAliasIndexBuffer;
 

@@ -38,7 +38,9 @@ namespace
 const std::string kShaderFile = "RenderPasses/ReSTIR_DI/ReSTIR.cs.slang";
 const char kInitEntry[] = "ReSTIR_Init";
 const char kVisibilityEntry[] = "ReSTIR_Visibility";
+const char kTemporalEntry[] = "ReSTIR_TemporalReuse";
 const char kInputVBuffer[] = "vbuffer";
+const char kInputMVec[] = "mvec";
 const char kRISSampleCount[] = "risSampleCount";
 }
 
@@ -64,6 +66,7 @@ RenderPassReflection ReSTIR_DI::reflect(const CompileData& compileData)
 {
     RenderPassReflection reflector;
     reflector.addInput(kInputVBuffer, "Visibility buffer in packed format");
+    reflector.addInput(kInputMVec, "Motion vector buffer (float2, current-to-previous in screen space)");
     return reflector;
 }
 
@@ -80,6 +83,7 @@ void ReSTIR_DI::setScene(RenderContext* pRenderContext, const ref<Scene>& pScene
 
     mpReservoirBuffer = nullptr;
     mpPrevReservoirBuffer = nullptr;
+    mpSurfaceBuffer = nullptr;
     mpAliasProbBuffer = nullptr;
     mpAliasIndexBuffer = nullptr;
     mReservoirElementCount = 0;
@@ -90,6 +94,7 @@ void ReSTIR_DI::recreatePrograms()
 {
     mpInitPass = nullptr;
     mpVisibilityPass = nullptr;
+    mpTemporalPass = nullptr;
 }
 
 /**
@@ -98,13 +103,15 @@ void ReSTIR_DI::recreatePrograms()
 void ReSTIR_DI::prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount)
 {
     const uint32_t pixelCount = mFrameDim.x * mFrameDim.y;
-    if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer)
+    if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer || !mpSurfaceBuffer)
     {
         mReservoirElementCount = pixelCount;
         mpReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gReservoir"], mReservoirElementCount);
         mpPrevReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gPrevReservoir"], mReservoirElementCount);
+        mpSurfaceBuffer = mpDevice->createStructuredBuffer(rootVar["gSurfaceData"], mReservoirElementCount);
         mpReservoirBuffer->setName("ReSTIR_DI::Reservoir");
         mpPrevReservoirBuffer->setName("ReSTIR_DI::PrevReservoir");
+        mpSurfaceBuffer->setName("ReSTIR_DI::SurfaceData");
     }
 
     const uint32_t aliasCount = std::max(lightCount, 1u);
@@ -209,7 +216,8 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
     if (!mpScene) return;
 
     auto pVBuffer = renderData.getTexture(kInputVBuffer);
-    if (!pVBuffer) return;
+    auto pMotionVectors = renderData.getTexture(kInputMVec);
+    if (!pVBuffer || !pMotionVectors) return;
 
     mFrameDim = uint2(pVBuffer->getWidth(), pVBuffer->getHeight());
 
@@ -245,6 +253,17 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
         mpVisibilityPass = ComputePass::create(mpDevice, desc, defines, true);
     }
 
+    if (!mpTemporalPass)
+    {
+        ProgramDesc desc;
+        desc.addShaderModules(mpScene->getShaderModules());
+        desc.addShaderLibrary(kShaderFile).csEntry(kTemporalEntry);
+        desc.addTypeConformances(mpScene->getTypeConformances());
+
+        auto defines = mpScene->getSceneDefines();
+        mpTemporalPass = ComputePass::create(mpDevice, desc, defines, true);
+    }
+
     auto bindCommonVars = [&](const ref<ComputePass>& pass)
     {
         auto rootVar = pass->getRootVar();
@@ -252,9 +271,11 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
 
         rootVar["gReservoir"] = mpReservoirBuffer;
         rootVar["gPrevReservoir"] = mpPrevReservoirBuffer;
+        rootVar["gSurfaceData"] = mpSurfaceBuffer;
         rootVar["gAliasProb"] = mpAliasProbBuffer;
         rootVar["gAliasIndex"] = mpAliasIndexBuffer;
         rootVar["vbuffer"] = pVBuffer;
+        rootVar["mvec"] = pMotionVectors;
 
         auto cb = rootVar["CB"];
         cb["gRIS_M"] = mRISSampleCount;
@@ -276,6 +297,9 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
 
     bindCommonVars(mpVisibilityPass);
     mpVisibilityPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+
+    bindCommonVars(mpTemporalPass);
+    mpTemporalPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
     std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
     mFrameIndex++;
 }
