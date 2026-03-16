@@ -40,6 +40,7 @@ struct Surface
     float3 nrmW;
     float3 woW;     //指向相机的方向
     float3 albedo;  //反射率
+    float3 emission;
     float  rough;   //粗糙度
     uint   valid;   //像素是否命中几何
 };
@@ -56,7 +57,7 @@ Texture2D<PackedHitInfo> vbuffer;
 Texture2D<float2> mvec;
 
 // Output color
-RWTexture2D<float3> color;
+RWTexture2D<float4> color;
 
 // ===============
 // 随机数生成
@@ -168,12 +169,11 @@ Surface DecodeSurfaceFromHit(const HitInfo hit)
 
     // 4) 填充 Surface
     s.posW = sd.posW;
-
     s.nrmW = sd.frame.N;
     s.woW = sd.V;
     s.albedo = props.diffuseReflectionAlbedo;
     s.rough = props.roughness;
-
+    s.emission = props.emission;
     s.valid = 1;
     return s;
 }
@@ -181,9 +181,31 @@ Surface DecodeSurfaceFromHit(const HitInfo hit)
 // 计算w的各项
 // ==================================
 
-//BRDF
-float3 CalcBRDF(Surface surf) {
-    return surf.albedo / PI;
+//BRDF (Diffuse + Specular GGX)
+float3 CalcBRDF(Surface surf, float3 wi) {
+    float3 wo = surf.woW;
+    float3 n = surf.nrmW;
+    float3 h = normalize(wi + wo);
+
+    // Diffuse (Lambertian)
+    float3 diffuse = surf.albedo / PI;
+
+    // Specular (GGX)
+    float alpha = surf.rough * surf.rough;
+    float alpha2 = alpha * alpha;
+    float NdotH = saturate(dot(n, h));
+    float D = alpha2 / (PI * (1 + (alpha2 - 1) * NdotH * NdotH) * (1 + (alpha2 - 1) * NdotH * NdotH));
+
+    float NdotWo = saturate(dot(n, wo));
+    float NdotWi = saturate(dot(n, wi));
+    float G = 1.0 / (1 + (alpha * 0.5) * (alpha * 0.5) / NdotWo + (alpha * 0.5) * (alpha * 0.5) / NdotWi);
+
+    float F0 = 0.04; // Dielectric F0
+    float F = F0 + (1 - F0) * pow(1 - saturate(dot(wo, h)), 5);
+
+    float3 specular = (D * G * F) / (4 * NdotWo * NdotWi + 1e-6);
+
+    return diffuse + specular;
 }
 // 几何项
 float CalcG(Surface surf, EmissiveTriangle tri, float2 bary) {
@@ -195,7 +217,8 @@ float CalcG(Surface surf, EmissiveTriangle tri, float2 bary) {
     float3 wi = normalize(L);
     float cosThetaS = saturate(dot(surf.nrmW, wi));
     float cosThetaL = saturate(dot(light.normal, -wi));
-    return (cosThetaS * cosThetaL / dist2);
+    float g = (cosThetaS * cosThetaL / max(dist2, 0.01f));
+    return min(g, 10.0f);
 }
 
 // Le
@@ -205,11 +228,19 @@ float3 CalcLe(EmissiveTriangle tri, float2 bary) {
 // w
 float Calcw(Surface surf, uint triLightID, float2 bary) {
     EmissiveTriangle tri = gScene.lightCollection.getTriangle(triLightID);
+    float3 lightPos = EvalLightSamplePosW(tri, bary);
+    float3 wi = normalize(lightPos - surf.posW);
+
     uint count = gScene.lightCollection.getTriangleCount();
     float p = gAliasProb[triLightID] / (float)count;
     p = p / tri.area;
-    float ph = luminance(CalcBRDF(surf) * CalcLe(tri, bary));
-    ph = ph * CalcG(surf, tri, bary);
+
+    float3 brdf = CalcBRDF(surf, wi);
+    float3 contrib = brdf * CalcLe(tri, bary) * CalcG(surf, tri, bary);
+
+    float ph = max(max(contrib.x, contrib.y), contrib.z);
+    ph = max(ph, 1e-6f);
+
     return ph / p;
 }
 
@@ -269,10 +300,15 @@ void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID) {
         }
         // calc W
         EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
-        float ph = luminance(CalcBRDF(surf) * CalcLe(tri, r.bary));
-        ph = ph * CalcG(surf, tri, r.bary);
+        float3 lightPos = EvalLightSamplePosW(tri, r.bary);
+        float3 wi = normalize(lightPos - surf.posW);
+        float3 brdf = CalcBRDF(surf, wi);
+        float3 contrib = brdf * CalcLe(tri, r.bary) * CalcG(surf, tri, r.bary);
+        float ph = max(max(contrib.x, contrib.y), contrib.z);
+        ph = max(ph, 1e-6f);
         if (r.M > 0 && ph > 0.f) {
             r.W = r.wsum / (float)r.M / ph;
+            r.W = min(r.W, 10.0f);
         } else {
             r.W = 0.f;
         }
@@ -348,8 +384,10 @@ Reservoir CombineReservoirs(uint2 pixel, Reservoir r1, Reservoir r2, uint state)
     if (r1.M > 0 && r1.W > 0.f)
     {
         EmissiveTriangle tri1 = gScene.lightCollection.getTriangle(r1.lightID);
-        float ph1 = luminance(CalcBRDF(surf) * CalcLe(tri1, r1.bary));
-        ph1 *= CalcG(surf, tri1, r1.bary);
+        float3 lightPos1 = EvalLightSamplePosW(tri1, r1.bary);
+        float3 wi1 = normalize(lightPos1 - surf.posW);
+        float3 brdf1 = CalcBRDF(surf, wi1);
+        float ph1 = luminance(brdf1 * CalcLe(tri1, r1.bary) * CalcG(surf, tri1, r1.bary));
         float w1 = ph1 * (float)r1.M * r1.W;
         if (w1 > 0.f) s.update(r1.lightID, r1.bary, w1, state);
     }
@@ -357,8 +395,12 @@ Reservoir CombineReservoirs(uint2 pixel, Reservoir r1, Reservoir r2, uint state)
     if (r2.M > 0 && r2.W > 0.f)
     {
         EmissiveTriangle tri2 = gScene.lightCollection.getTriangle(r2.lightID);
-        float ph2 = luminance(CalcBRDF(surf) * CalcLe(tri2, r2.bary));
-        ph2 *= CalcG(surf, tri2, r2.bary);
+        float3 lightPos2 = EvalLightSamplePosW(tri2, r2.bary);
+        float3 wi2 = normalize(lightPos2 - surf.posW);
+        float3 brdf2 = CalcBRDF(surf, wi2);
+        float3 contrib2 = brdf2 * CalcLe(tri2, r2.bary) * CalcG(surf, tri2, r2.bary);
+        float ph2 = max(max(contrib2.x, contrib2.y), contrib2.z);
+        ph2 = max(ph2, 1e-6f);
         float w2 = ph2 * (float)r2.M * r2.W;
         if (w2 > 0.f) s.update(r2.lightID, r2.bary, w2, state);
     }
@@ -370,10 +412,15 @@ Reservoir CombineReservoirs(uint2 pixel, Reservoir r1, Reservoir r2, uint state)
     }
 
     EmissiveTriangle triS = gScene.lightCollection.getTriangle(s.lightID);
-    float phS = luminance(CalcBRDF(surf) * CalcLe(triS, s.bary));
-    phS *= CalcG(surf, triS, s.bary);
+    float3 lightPosS = EvalLightSamplePosW(triS, s.bary);
+    float3 wiS = normalize(lightPosS - surf.posW);
+    float3 brdfS = CalcBRDF(surf, wiS);
+    float3 contribS = brdfS * CalcLe(triS, s.bary) * CalcG(surf, triS, s.bary);
+    float phS = max(max(contribS.x, contribS.y), contribS.z);
+    phS = max(phS, 1e-6f);
     if (phS > 0.f) {
         s.W = s.wsum / ((float)s.M * phS);
+        s.W = min(s.W, 10.0f);
     } else {
         s.W = 0.f;
     }
@@ -410,10 +457,13 @@ Reservoir combineReservoirSet(uint2 pixel, Reservoir rs[9], uint count,uint stat
         Reservoir r = rs[i];
         sumM = sumM + r.M;
         if (r.M == 0 || r.W <= 0.f) continue;
-        float ph = 0.f;
         EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
-        ph = luminance(CalcBRDF(surf) * CalcLe(tri, r.bary));
-        ph = ph * CalcG(surf, tri, r.bary);
+        float3 lightPos = EvalLightSamplePosW(tri, r.bary);
+        float3 wi = normalize(lightPos - surf.posW);
+        float3 brdf = CalcBRDF(surf, wi);
+        float3 contrib = brdf * CalcLe(tri, r.bary) * CalcG(surf, tri, r.bary);
+        float ph = max(max(contrib.x, contrib.y), contrib.z);
+        ph = max(ph, 1e-6f);
         s.update(r.lightID, r.bary, r.W * ph * r.M, state);
     }
     s.M = sumM;
@@ -422,13 +472,18 @@ Reservoir combineReservoirSet(uint2 pixel, Reservoir rs[9], uint count,uint stat
         return s;
     }
     EmissiveTriangle tri = gScene.lightCollection.getTriangle(s.lightID);
-    float ph = luminance(CalcBRDF(surf) * CalcLe(tri, s.bary));
-    ph = ph * CalcG(surf, tri, s.bary);
+    float3 lightPos = EvalLightSamplePosW(tri, s.bary);
+    float3 wi = normalize(lightPos - surf.posW);
+    float3 brdf = CalcBRDF(surf, wi);
+    float3 contrib = brdf * CalcLe(tri, s.bary) * CalcG(surf, tri, s.bary);
+    float ph = max(max(contrib.x, contrib.y), contrib.z);
+    ph = max(ph, 1e-6f);
     if (ph <= 0.f) {
         s.W = 0.f;
         return s;
     }
     s.W = s.wsum / (ph * (float)s.M);
+    s.W = min(s.W, 10.0f);
     return s;
 }
 // ===================
@@ -469,11 +524,14 @@ void ReSTIR_ShadeColor(uint3 dispatchThreadId: SV_DispatchThreadID) {
     Reservoir r = gReservoir[pixelIndex];
     Surface surf = gSurfaceData[pixelIndex];
     if (surf.valid == 0 || r.M == 0 || r.W <= 0) {
-        color[pixel] = float3(0, 0, 0);
+        color[pixel] = float4(0, 0, 0, 1);
         return;
     }
     EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
-    float3 f = CalcBRDF(surf) * CalcLe(tri, r.bary);
+    float3 lightPos = EvalLightSamplePosW(tri, r.bary);
+    float3 wi = normalize(lightPos - surf.posW);
+    float3 f = CalcBRDF(surf, wi) * CalcLe(tri, r.bary);
     float g = CalcG(surf, tri, r.bary);
-    color[pixel] = f * g * r.W;
+    float3 Lo = f * g * r.W + surf.emission;
+    color[pixel] = float4(Lo, 1);
 }

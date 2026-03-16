@@ -79,9 +79,11 @@ Properties ReSTIR_DI::getProperties() const
 RenderPassReflection ReSTIR_DI::reflect(const CompileData& compileData)
 {
     RenderPassReflection reflector;
-    reflector.addInput(kInputVBuffer, "Visibility buffer in packed format");
-    reflector.addInput(kInputMVec, "Motion vector buffer (float2, current-to-previous in screen space)");
-    reflector.addOutput(kOutputColor, "Shaded output color");
+    reflector.addInput(kInputVBuffer, "Visibility buffer in packed format").bindFlags(ResourceBindFlags::ShaderResource);
+    reflector.addInput(kInputMVec, "Motion vector buffer (float2, current-to-previous in screen space)").bindFlags(ResourceBindFlags::ShaderResource);
+    reflector.addOutput(kOutputColor, "Shaded output color")
+        .bindFlags(ResourceBindFlags::UnorderedAccess | ResourceBindFlags::ShaderResource)
+        .format(ResourceFormat::RGBA32Float);
     return reflector;
 }
 
@@ -132,8 +134,8 @@ void ReSTIR_DI::prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount)
     if (aliasCount != mAliasElementCount || !mpAliasProbBuffer || !mpAliasIndexBuffer)
     {
         mAliasElementCount = aliasCount;
-        mpAliasProbBuffer = mpDevice->createTypedBuffer<float>(aliasCount, ResourceBindFlags::ShaderResource, MemoryType::DeviceLocal, nullptr);
-        mpAliasIndexBuffer = mpDevice->createTypedBuffer<uint32_t>(aliasCount, ResourceBindFlags::ShaderResource, MemoryType::DeviceLocal, nullptr);
+        mpAliasProbBuffer = mpDevice->createStructuredBuffer(rootVar["gAliasProb"], aliasCount);
+        mpAliasIndexBuffer = mpDevice->createStructuredBuffer(rootVar["gAliasIndex"], aliasCount);
         mpAliasProbBuffer->setName("ReSTIR_DI::AliasProb");
         mpAliasIndexBuffer->setName("ReSTIR_DI::AliasIndex");
     }
@@ -328,6 +330,9 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
         lightCount = (uint32_t)pLights->getMeshLightTriangles(pRenderContext).size();
     }
     prepareBuffers(mpInitPass->getRootVar(), lightCount);
+    // Ensure previous-frame reservoir is cleared on first frame (or after resize) to avoid uninitialized data.
+    pRenderContext->clearUAV(mpPrevReservoirBuffer->getUAV().get(), uint4(0));
+
     updateAliasTable(pRenderContext, pLights, lightCount);
 
     bindCommonVars(mpInitPass);
