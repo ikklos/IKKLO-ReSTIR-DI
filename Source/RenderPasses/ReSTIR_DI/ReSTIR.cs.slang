@@ -15,6 +15,7 @@ cbuffer CB{
     uint gRIS_M;
     float2 gFrameDim;
     uint gFrameIndex;
+    uint gRandomSeed;
 }
 struct Reservoir
 {
@@ -54,6 +55,9 @@ StructuredBuffer<uint> gAliasIndex;
 Texture2D<PackedHitInfo> vbuffer;
 Texture2D<float2> mvec;
 
+// Output color
+RWTexture2D<float3> color;
+
 // ===============
 // 随机数生成
 // ===============
@@ -87,13 +91,12 @@ uint hash32(uint x)
     return x;
 }
 
-uint initRandomSeed(uint2 pixel, uint frameIndex, uint stage)
+uint initRandomSeed(uint2 pixel, uint gSeed)
 {
     uint seed = 0x9e3779b9u;
     seed ^= hash32(pixel.x + 0x68bc21ebu);
     seed ^= hash32(pixel.y + 0x02e5be93u);
-    seed ^= hash32(frameIndex + 0x967a889bu);
-    seed ^= hash32(stage + 0x8e22a938u);
+    seed ^= hash32(gSeed + 0x967a889bu);
     return max(hash32(seed), 1u);
 }
 // =========================================================================================
@@ -228,7 +231,7 @@ void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID) {
     }
     int n = clamp(gRIS_M, 0, kMaxSampleCount);
     uint lightCount = gScene.lightCollection.getTriangleCount();
-    uint randomState = initRandomSeed(pixel, gFrameIndex,1);
+    uint randomState = initRandomSeed(pixel, gRandomSeed);
     uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
     if (lightCount == 0 || n == 0) {
         HitInfo hit0 = unpackHitInfo(vbuffer[pixel]);
@@ -391,9 +394,86 @@ void ReSTIR_TemporalReuse(uint3 dispatchThreadId: SV_DispatchThreadID) {
     uint2 prevP = getPrevPixel(pixel);
     uint prevPixelIndex = prevP.y * (uint)gFrameDim.x + prevP.x;
     // random seed
-    uint randomState = initRandomSeed(pixel, gFrameIndex, 3);
+    uint randomState = initRandomSeed(pixel, gRandomSeed);
     // update
     gReservoir[pixelIndex] = CombineReservoirs(pixel, gReservoir[pixelIndex],
          gPrevReservoir[prevPixelIndex], randomState);
-
+}
+Reservoir combineReservoirSet(uint2 pixel, Reservoir rs[9], uint count,uint state) {
+    Reservoir s = Reservoir();
+    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    Surface surf = gSurfaceData[pixelIndex];
+    if (surf.valid == 0) return s;
+    uint sumM = 0;
+    for (uint i = 0; i < 9; i++) {
+        if (i >= count) break;
+        Reservoir r = rs[i];
+        sumM = sumM + r.M;
+        if (r.M == 0 || r.W <= 0.f) continue;
+        float ph = 0.f;
+        EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
+        ph = luminance(CalcBRDF(surf) * CalcLe(tri, r.bary));
+        ph = ph * CalcG(surf, tri, r.bary);
+        s.update(r.lightID, r.bary, r.W * ph * r.M, state);
+    }
+    s.M = sumM;
+    if (s.M == 0) {
+        s.W = 0.f;
+        return s;
+    }
+    EmissiveTriangle tri = gScene.lightCollection.getTriangle(s.lightID);
+    float ph = luminance(CalcBRDF(surf) * CalcLe(tri, s.bary));
+    ph = ph * CalcG(surf, tri, s.bary);
+    if (ph <= 0.f) {
+        s.W = 0.f;
+        return s;
+    }
+    s.W = s.wsum / (ph * (float)s.M);
+    return s;
+}
+// ===================
+// stage 4
+// ===================
+[numthreads(16, 16, 1)]
+void ReSTIR_SpatialReuse(uint3 dispatchThreadId: SV_DispatchThreadID) {
+    uint2 pixel = dispatchThreadId.xy;
+    if (pixel.x >= gFrameDim.x || pixel.y >= gFrameDim.y) return;
+    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    uint randomState = initRandomSeed(pixel, gRandomSeed);
+    Reservoir rs[9];
+    uint count = 0;
+    for (int i = -1; i <= 1; i++) {
+        for (int j = -1; j <= 1; j++) {
+            int2 p = (int2)pixel;
+            p = p + int2(i, j);
+            if (p.x < 0 || p.x >= (int)gFrameDim.x || p.y < 0 || p.y >= (int)gFrameDim.y) {
+                continue;
+            }
+            uint index = (uint)p.y * (uint)gFrameDim.x + (uint)p.x;
+            rs[count] = gPrevReservoir[index];
+            count++;
+        }
+    }
+    Reservoir r = combineReservoirSet(pixel, rs, count, randomState);
+    gReservoir[pixelIndex] = r;
+}
+// ========================
+// Stage 5
+// shade pixel
+// ========================
+[numthreads(16,16,1)]
+void ReSTIR_ShadeColor(uint3 dispatchThreadId: SV_DispatchThreadID) {
+    uint2 pixel = dispatchThreadId.xy;
+    if (pixel.x >= gFrameDim.x || pixel.y >= gFrameDim.y) return;
+    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    Reservoir r = gReservoir[pixelIndex];
+    Surface surf = gSurfaceData[pixelIndex];
+    if (surf.valid == 0 || r.M == 0 || r.W <= 0) {
+        color[pixel] = float3(0, 0, 0);
+        return;
+    }
+    EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
+    float3 f = CalcBRDF(surf) * CalcLe(tri, r.bary);
+    float g = CalcG(surf, tri, r.bary);
+    color[pixel] = f * g * r.W;
 }

@@ -61,6 +61,8 @@ private:
     ref<ComputePass> mpInitPass;
     ref<ComputePass> mpVisibilityPass;
     ref<ComputePass> mpTemporalPass;
+    ref<ComputePass> mpSpatialPass;
+    ref<ComputePass> mpShadePass;
 
     ref<Buffer> mpReservoirBuffer;
     ref<Buffer> mpPrevReservoirBuffer;
@@ -71,6 +73,7 @@ private:
     uint2 mFrameDim = uint2(0, 0);
     uint32_t mFrameIndex = 0;
     uint32_t mRISSampleCount = 8;
+    uint32_t mSpatialReuseCount = 1;
     uint32_t mReservoirElementCount = 0;
     uint32_t mAliasElementCount = 0;
 };

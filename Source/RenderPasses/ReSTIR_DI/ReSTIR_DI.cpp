@@ -27,6 +27,8 @@
  **************************************************************************/
 #include "ReSTIR_DI.h"
 #include <algorithm>
+#include <iostream>
+#include <random>
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
 {
@@ -39,9 +41,18 @@ const std::string kShaderFile = "RenderPasses/ReSTIR_DI/ReSTIR.cs.slang";
 const char kInitEntry[] = "ReSTIR_Init";
 const char kVisibilityEntry[] = "ReSTIR_Visibility";
 const char kTemporalEntry[] = "ReSTIR_TemporalReuse";
+const char kSpatialEntry[] = "ReSTIR_SpatialReuse";
+const char kShadeEntry[] = "ReSTIR_ShadeColor";
 const char kInputVBuffer[] = "vbuffer";
 const char kInputMVec[] = "mvec";
+const char kOutputColor[] = "color";
 const char kRISSampleCount[] = "risSampleCount";
+const char kSpatialReuseCount[] = "spatialReuseCount";
+}
+uint32_t getSeed(){
+    static thread_local std::mt19937 mt{std::random_device{}()};
+    static thread_local std::uniform_int_distribution<uint32_t> dist(0,UINT32_MAX);
+    return dist(mt);
 }
 
 ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(pDevice)
@@ -50,6 +61,8 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
     {
         if (key == kRISSampleCount)
             mRISSampleCount = value;
+        else if(key == kSpatialReuseCount)
+            mSpatialReuseCount = value;
         else
             logWarning("Unknown property '{}' in ReSTIR_DI properties.", key);
     }
@@ -59,6 +72,7 @@ Properties ReSTIR_DI::getProperties() const
 {
     Properties props;
     props[kRISSampleCount] = mRISSampleCount;
+    props[kSpatialReuseCount] = mSpatialReuseCount;
     return props;
 }
 
@@ -67,6 +81,7 @@ RenderPassReflection ReSTIR_DI::reflect(const CompileData& compileData)
     RenderPassReflection reflector;
     reflector.addInput(kInputVBuffer, "Visibility buffer in packed format");
     reflector.addInput(kInputMVec, "Motion vector buffer (float2, current-to-previous in screen space)");
+    reflector.addOutput(kOutputColor, "Shaded output color");
     return reflector;
 }
 
@@ -95,11 +110,10 @@ void ReSTIR_DI::recreatePrograms()
     mpInitPass = nullptr;
     mpVisibilityPass = nullptr;
     mpTemporalPass = nullptr;
+    mpSpatialPass = nullptr;
+    mpShadePass = nullptr;
 }
 
-/**
- * @brief
- */
 void ReSTIR_DI::prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount)
 {
     const uint32_t pixelCount = mFrameDim.x * mFrameDim.y;
@@ -138,7 +152,7 @@ void ReSTIR_DI::updateAliasTable(RenderContext* pRenderContext, const ref<LightC
     {
         pLights->prepareSyncCPUData(pRenderContext);
         const auto& triangles = pLights->getMeshLightTriangles(pRenderContext);
-        const uint32_t triCount = lightCount;
+        const uint32_t triCount = std::min(lightCount, (uint32_t)triangles.size());
 
         std::vector<float> weights(lightCount, 0.f);
         float sumWeight = 0.f;
@@ -217,7 +231,8 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
 
     auto pVBuffer = renderData.getTexture(kInputVBuffer);
     auto pMotionVectors = renderData.getTexture(kInputMVec);
-    if (!pVBuffer || !pMotionVectors) return;
+    auto pColor = renderData.getTexture(kOutputColor);
+    if (!pVBuffer || !pMotionVectors || !pColor) return;
 
     mFrameDim = uint2(pVBuffer->getWidth(), pVBuffer->getHeight());
 
@@ -264,13 +279,35 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
         mpTemporalPass = ComputePass::create(mpDevice, desc, defines, true);
     }
 
-    auto bindCommonVars = [&](const ref<ComputePass>& pass)
+    if (!mpSpatialPass)
+    {
+        ProgramDesc desc;
+        desc.addShaderModules(mpScene->getShaderModules());
+        desc.addShaderLibrary(kShaderFile).csEntry(kSpatialEntry);
+        desc.addTypeConformances(mpScene->getTypeConformances());
+
+        auto defines = mpScene->getSceneDefines();
+        mpSpatialPass = ComputePass::create(mpDevice, desc, defines, true);
+    }
+
+    if (!mpShadePass)
+    {
+        ProgramDesc desc;
+        desc.addShaderModules(mpScene->getShaderModules());
+        desc.addShaderLibrary(kShaderFile).csEntry(kShadeEntry);
+        desc.addTypeConformances(mpScene->getTypeConformances());
+
+        auto defines = mpScene->getSceneDefines();
+        mpShadePass = ComputePass::create(mpDevice, desc, defines, true);
+    }
+
+    auto bindCommonVars = [&](const ref<ComputePass>& pass, const ref<Buffer>& pReservoir = nullptr, const ref<Buffer>& pPrevReservoir = nullptr)
     {
         auto rootVar = pass->getRootVar();
         mpScene->bindShaderData(rootVar["gScene"]);
 
-        rootVar["gReservoir"] = mpReservoirBuffer;
-        rootVar["gPrevReservoir"] = mpPrevReservoirBuffer;
+        rootVar["gReservoir"] = pReservoir ? pReservoir : mpReservoirBuffer;
+        rootVar["gPrevReservoir"] = pPrevReservoir ? pPrevReservoir : mpPrevReservoirBuffer;
         rootVar["gSurfaceData"] = mpSurfaceBuffer;
         rootVar["gAliasProb"] = mpAliasProbBuffer;
         rootVar["gAliasIndex"] = mpAliasIndexBuffer;
@@ -281,6 +318,7 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
         cb["gRIS_M"] = mRISSampleCount;
         cb["gFrameDim"] = float2((float)mFrameDim.x, (float)mFrameDim.y);
         cb["gFrameIndex"] = mFrameIndex;
+        cb["gRandomSeed"] = getSeed();
     };
 
     uint32_t lightCount = 0u;
@@ -300,11 +338,25 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
 
     bindCommonVars(mpTemporalPass);
     mpTemporalPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+
+    // Make temporal result the stable SRV input for spatial pass.
     std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
+    for(uint i = 0; i < (uint)mSpatialReuseCount; i++){
+        bindCommonVars(mpSpatialPass);
+        mpSpatialPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+        std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
+    }
+
+    // After spatial loop, the latest reservoir resides in mpPrevReservoirBuffer due the final swap.
+    bindCommonVars(mpShadePass, mpPrevReservoirBuffer, mpReservoirBuffer);
+    mpShadePass->getRootVar()["color"] = pColor;
+    mpShadePass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+
     mFrameIndex++;
 }
 
 void ReSTIR_DI::renderUI(Gui::Widgets& widget)
 {
     widget.var("RIS M", mRISSampleCount, 1u, 64u);
+    widget.var("Spatial Reuse times", mSpatialReuseCount, 1u, 5u);
 }
