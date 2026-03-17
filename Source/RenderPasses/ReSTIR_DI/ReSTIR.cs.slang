@@ -5,15 +5,17 @@ import Utils.Debug.PixelDebug;
 import Utils.Color.ColorMap;
 import Utils.Color.ColorHelpers;
 import Utils.Sampling.SampleGenerator;
+import Utils.Sampling.TinyUniformSampleGenerator;
 
 import Scene.RaytracingInline;
 import Scene.Scene;
+import LoadShadingData;
 
 import Utils.Math.Ray;
 #define PI 3.14159265358979323846
 cbuffer CB{
     uint gRIS_M;
-    float2 gFrameDim;
+    uint2 gFrameDim;
     uint gFrameIndex;
     uint gRandomSeed;
 }
@@ -36,22 +38,18 @@ struct Reservoir
 };
 struct Surface
 {
-    float3 posW;
+    ShadingData sd;
     float3 nrmW;
-    float3 woW;     //指向相机的方向
-    float3 albedo;  //反射率
-    float3 emission;
-    float  rough;   //粗糙度
     uint   valid;   //像素是否命中几何
 };
 //蓄水池
 RWStructuredBuffer<Reservoir> gReservoir;
 StructuredBuffer<Reservoir> gPrevReservoir;
-RWStructuredBuffer<Surface> gSurfaceData;
 
 //Alias Table
 StructuredBuffer<float> gAliasProb;
 StructuredBuffer<uint> gAliasIndex;
+StructuredBuffer<float> gLightPmf;
 //输入纹理
 Texture2D<PackedHitInfo> vbuffer;
 Texture2D<float2> mvec;
@@ -103,77 +101,23 @@ uint initRandomSeed(uint2 pixel, uint gSeed)
 // =========================================================================================
 // 从Vbuffer中解压出surf信息（不依赖主射线重建）
 // =========================================================================================
-Surface DecodeSurfaceFromHit(const HitInfo hit)
+Surface DecodeSurfaceFromHit(uint2 pixel)
 {
     Surface s = {};
     s.valid = 0;
 
-    // 1) 从 hit 得到 instance/material + 顶点属性 v
-    uint materialID = 0;
-    VertexData v = {};
-
-    switch (hit.getType())
-    {
-    case HitType::Triangle:
-    {
-        const TriangleHit th = hit.getTriangleHit();
-        materialID = gScene.getMaterialID(th.instanceID);
-        v = gScene.getVertexData(th);
-        break;
-    }
-    case HitType::DisplacedTriangle:
-    {
-        // Approximate view direction for displaced geometry.
-        const DisplacedTriangleHit dh = hit.getDisplacedTriangleHit();
-        materialID = gScene.getMaterialID(dh.instanceID);
-        float3 approxViewDir = gScene.camera.data.target - gScene.camera.data.posW;
-        if (dot(approxViewDir, approxViewDir) > 1e-12f) {
-            approxViewDir = normalize(approxViewDir);
-        } else {
-            approxViewDir = float3(0.f, 0.f, -1.f);
-        }
-        v = gScene.getVertexData(dh, approxViewDir);
-        break;
-    }
-    case HitType::Curve:
-    {
-        const CurveHit ch = hit.getCurveHit();
-        materialID = gScene.getMaterialID(ch.instanceID);
-        v = gScene.getVertexDataFromCurve(ch);
-        break;
-    }
-    case HitType::SDFGrid:
-    {
-        // SDF grid vertex reconstruction requires ray origin/direction.
-        // Skip for this lightweight path.
+    // Use the same shading data path as other render passes to ensure consistency.
+    ShadingData sd;
+    if (!loadShadingData(pixel, gFrameDim, gScene.camera, vbuffer, sd))
         return s;
-    }
-    default:
-        return s;
-    }
 
-    float3 viewDir = gScene.camera.data.posW - v.posW;
-    if (dot(viewDir, viewDir) > 1e-12f) {
-        viewDir = normalize(viewDir);
-    } else {
-        viewDir = float3(0.f, 0.f, 1.f);
-    }
-
-    // 2) 生成 ShadingData
-    const ShadingData sd = gScene.materials.prepareShadingData(v, materialID, viewDir);
-
-    // 3) 取材质属性（albedo/roughness 等）
+    const uint hints = getMaterialInstanceHints();
     let lod = ExplicitLodTextureSampler(0.f);
-    let mi = gScene.materials.getMaterialInstance(sd, lod);
+    let mi = gScene.materials.getMaterialInstance(sd, lod, hints);
     let props = mi.getProperties(sd);
 
-    // 4) 填充 Surface
-    s.posW = sd.posW;
-    s.nrmW = sd.frame.N;
-    s.woW = sd.V;
-    s.albedo = props.diffuseReflectionAlbedo;
-    s.rough = props.roughness;
-    s.emission = props.emission;
+    s.sd = sd;
+    s.nrmW = props.guideNormal;
     s.valid = 1;
     return s;
 }
@@ -182,29 +126,18 @@ Surface DecodeSurfaceFromHit(const HitInfo hit)
 // ==================================
 
 //BRDF (Diffuse + Specular GGX)
-float3 CalcBRDF(Surface surf, float3 wi) {
-    float3 wo = surf.woW;
-    float3 n = surf.nrmW;
-    float3 h = normalize(wi + wo);
-
-    // Diffuse (Lambertian)
-    float3 diffuse = surf.albedo / PI;
-
-    // Specular (GGX)
-    float alpha = surf.rough * surf.rough;
-    float alpha2 = alpha * alpha;
-    float NdotH = saturate(dot(n, h));
-    float D = alpha2 / (PI * (1 + (alpha2 - 1) * NdotH * NdotH) * (1 + (alpha2 - 1) * NdotH * NdotH));
-
-    float NdotWo = saturate(dot(n, wo));
-    float NdotWi = saturate(dot(n, wi));
-    float G = 1.0 / (1 + (alpha * 0.5) * (alpha * 0.5) / NdotWo + (alpha * 0.5) * (alpha * 0.5) / NdotWi);
-
-    float F0 = 0.04; // Dielectric F0
-    float F = F0 + (1 - F0) * pow(1 - saturate(dot(wo, h)), 5);
-
-    float3 specular = (D * G * F) / (4 * NdotWo * NdotWi + 1e-6);
-
+float3 CalcBRDF(Surface surf, float3 wi, uint2 pixel) {
+    if (surf.valid == 0)
+        return float3(0, 0, 0);
+    const uint hints = getMaterialInstanceHints();
+    let lod = ExplicitLodTextureSampler(0.f);
+    let mi = gScene.materials.getMaterialInstance(surf.sd, lod, hints);
+    uint sampleNum = gRandomSeed ^ gFrameIndex;
+    TinyUniformSampleGenerator sg = TinyUniformSampleGenerator(pixel, sampleNum);
+    surf.sd.mtl.setActiveLobes((uint)LobeType::DiffuseReflection);
+    let diffuse = mi.eval(surf.sd, wi, sg);
+    surf.sd.mtl.setActiveLobes((uint)LobeType::SpecularReflection);
+    let specular = mi.eval(surf.sd, wi, sg);
     return diffuse + specular;
 }
 // 几何项
@@ -212,7 +145,7 @@ float CalcG(Surface surf, EmissiveTriangle tri, float2 bary) {
     EmissiveTriangle light = tri;
     float b0 = 1 - bary.x - bary.y;
     float3 samp = light.posW[0] * b0 + light.posW[1] * bary.x + light.posW[2] * bary.y; // rebuild samp
-    float3 L = samp - surf.posW;
+    float3 L = samp - surf.sd.posW;
     float dist2 = dot(L, L);
     float3 wi = normalize(L);
     float cosThetaS = saturate(dot(surf.nrmW, wi));
@@ -226,19 +159,23 @@ float3 CalcLe(EmissiveTriangle tri, float2 bary) {
     return gScene.materials.evalEmissive(tri.materialID, tri.getTexCoord(float3(1 - bary.x - bary.y, bary.x, bary.y)));
 }
 // w
-float Calcw(Surface surf, uint triLightID, float2 bary) {
+float Calcw(Surface surf, uint triLightID, float2 bary, uint2 pixel) {
     EmissiveTriangle tri = gScene.lightCollection.getTriangle(triLightID);
+    if (tri.area <= 0.f) return 0.f;
+
+    float pmf = gLightPmf[triLightID];
+    if (pmf <= 0.f) return 0.f;
+
     float3 lightPos = EvalLightSamplePosW(tri, bary);
-    float3 wi = normalize(lightPos - surf.posW);
+    float3 wi = normalize(lightPos - surf.sd.posW);
 
-    uint count = gScene.lightCollection.getTriangleCount();
-    float p = gAliasProb[triLightID] / (float)count;
-    p = p / tri.area;
+    float p = pmf / tri.area;
+    if (p <= 0.f) return 0.f;
 
-    float3 brdf = CalcBRDF(surf, wi);
+    float3 brdf = CalcBRDF(surf, wi, pixel);
     float3 contrib = brdf * CalcLe(tri, bary) * CalcG(surf, tri, bary);
 
-    float ph = max(max(contrib.x, contrib.y), contrib.z);
+    float ph = luminance(contrib);
     ph = max(ph, 1e-6f);
 
     return ph / p;
@@ -263,18 +200,13 @@ void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID) {
     int n = clamp(gRIS_M, 0, kMaxSampleCount);
     uint lightCount = gScene.lightCollection.getTriangleCount();
     uint randomState = initRandomSeed(pixel, gRandomSeed);
-    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    uint pixelIndex = pixel.y * gFrameDim.x + pixel.x;
     if (lightCount == 0 || n == 0) {
-        HitInfo hit0 = unpackHitInfo(vbuffer[pixel]);
-        Surface surf0 = DecodeSurfaceFromHit(hit0);
-        gSurfaceData[pixelIndex] = surf0;
         gReservoir[pixelIndex] = Reservoir();
         return;
     }
     //get surface
-    HitInfo hit = unpackHitInfo(vbuffer[pixel]);
-    Surface surf = DecodeSurfaceFromHit(hit);
-    gSurfaceData[pixelIndex] = surf;
+    Surface surf = DecodeSurfaceFromHit(pixel);
     // ===========================
     // RIS
     // ===========================
@@ -288,23 +220,26 @@ void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID) {
                 if (rand01(randomState) > gAliasProb[p]) {
                     p = gAliasIndex[p];
                 }
+                if (gLightPmf[p] <= 0.f) {
+                    continue;
+                }
                 // samp point on triangle
                 float2 u = rand2(randomState);
                 float su0 = sqrt(u.x);
                 float s1 = su0 * (1.0 - u.y);
                 float s2 = su0 * u.y;
                 float2 bary = float2(s1, s2);
-                float wi = Calcw(surf, p, bary);
+                float wi = Calcw(surf, p, bary, pixel);
                 r.update(p, bary, wi, randomState);
             }
         }
         // calc W
         EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
         float3 lightPos = EvalLightSamplePosW(tri, r.bary);
-        float3 wi = normalize(lightPos - surf.posW);
-        float3 brdf = CalcBRDF(surf, wi);
+        float3 wi = normalize(lightPos - surf.sd.posW);
+        float3 brdf = CalcBRDF(surf, wi, pixel);
         float3 contrib = brdf * CalcLe(tri, r.bary) * CalcG(surf, tri, r.bary);
-        float ph = max(max(contrib.x, contrib.y), contrib.z);
+        float ph = luminance(contrib);
         ph = max(ph, 1e-6f);
         if (r.M > 0 && ph > 0.f) {
             r.W = r.wsum / (float)r.M / ph;
@@ -326,13 +261,13 @@ void ReSTIR_Visibility(uint3 dispatchThreadId: SV_DispatchThreadID) {
         return;
     }
 
-    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    uint pixelIndex = pixel.y * gFrameDim.x + pixel.x;
     Reservoir r = gReservoir[pixelIndex];
     if (r.M == 0 || r.W <= 0.f) {
         return;
     }
 
-    Surface surf = gSurfaceData[pixelIndex];
+    Surface surf = DecodeSurfaceFromHit(pixel);
     if (surf.valid == 0) {
         gReservoir[pixelIndex] = Reservoir();
         return;
@@ -340,7 +275,7 @@ void ReSTIR_Visibility(uint3 dispatchThreadId: SV_DispatchThreadID) {
 
     EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
     float3 lightPosW = EvalLightSamplePosW(tri, r.bary);
-    float3 toLight = lightPosW - surf.posW;
+    float3 toLight = lightPosW - surf.sd.posW;
     float dist = length(toLight);
     if (dist <= 1e-4f) {
         r.W = 0.f;
@@ -350,7 +285,7 @@ void ReSTIR_Visibility(uint3 dispatchThreadId: SV_DispatchThreadID) {
     }
 
     float3 dir = toLight / dist;
-    float3 origin = surf.posW + surf.nrmW * 1e-3f;
+    float3 origin = surf.sd.computeRayOrigin();
     float tMax = max(dist - 2e-3f, 0.f);
 
     SceneRayQuery<1> rayQuery;
@@ -367,15 +302,28 @@ uint2 getPrevPixel(uint2 pixel) {
     float2 prev = curr + motion * gFrameDim;
     int2 prevPix = int2(floor(prev));
 
-    if (prevPix.x < 0 || prevPix.y < 0 || prevPix.x >= (int)gFrameDim.x || prevPix.y >= (int)gFrameDim.y) {
+    if (prevPix.x < 0 || prevPix.y < 0 || prevPix.x >= gFrameDim.x || prevPix.y >= gFrameDim.y) {
         return pixel;
     }
     return uint2(prevPix);
 }
-Reservoir CombineReservoirs(uint2 pixel, Reservoir r1, Reservoir r2, uint state) {
+
+bool areSurfacesCompatible(const Surface a, const Surface b)
+{
+    if (a.valid == 0 || b.valid == 0) return false;
+
+    const float nDot = dot(a.nrmW, b.nrmW);
+    if (nDot < 0.95f) return false;
+
+    float3 dP = b.sd.posW - a.sd.posW;
+    const float planeDist = abs(dot(dP, a.nrmW));
+    if (planeDist > 0.01f) return false;
+
+    return true;
+}
+
+Reservoir CombineReservoirs(uint2 pixel, const Surface surf, Reservoir r1, Reservoir r2, uint state) {
     Reservoir s = Reservoir();
-    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
-    Surface surf = gSurfaceData[pixelIndex];
 
     if (surf.valid == 0) {
         return s;
@@ -385,9 +333,11 @@ Reservoir CombineReservoirs(uint2 pixel, Reservoir r1, Reservoir r2, uint state)
     {
         EmissiveTriangle tri1 = gScene.lightCollection.getTriangle(r1.lightID);
         float3 lightPos1 = EvalLightSamplePosW(tri1, r1.bary);
-        float3 wi1 = normalize(lightPos1 - surf.posW);
-        float3 brdf1 = CalcBRDF(surf, wi1);
-        float ph1 = luminance(brdf1 * CalcLe(tri1, r1.bary) * CalcG(surf, tri1, r1.bary));
+        float3 wi1 = normalize(lightPos1 - surf.sd.posW);
+        float3 brdf1 = CalcBRDF(surf, wi1, pixel);
+        float3 contrib1 = brdf1 * CalcLe(tri1, r1.bary) * CalcG(surf, tri1, r1.bary);
+        float ph1 = luminance(contrib1);
+        ph1 = max(ph1, 1e-6f);
         float w1 = ph1 * (float)r1.M * r1.W;
         if (w1 > 0.f) s.update(r1.lightID, r1.bary, w1, state);
     }
@@ -396,10 +346,10 @@ Reservoir CombineReservoirs(uint2 pixel, Reservoir r1, Reservoir r2, uint state)
     {
         EmissiveTriangle tri2 = gScene.lightCollection.getTriangle(r2.lightID);
         float3 lightPos2 = EvalLightSamplePosW(tri2, r2.bary);
-        float3 wi2 = normalize(lightPos2 - surf.posW);
-        float3 brdf2 = CalcBRDF(surf, wi2);
+        float3 wi2 = normalize(lightPos2 - surf.sd.posW);
+        float3 brdf2 = CalcBRDF(surf, wi2, pixel);
         float3 contrib2 = brdf2 * CalcLe(tri2, r2.bary) * CalcG(surf, tri2, r2.bary);
-        float ph2 = max(max(contrib2.x, contrib2.y), contrib2.z);
+        float ph2 = luminance(contrib2);
         ph2 = max(ph2, 1e-6f);
         float w2 = ph2 * (float)r2.M * r2.W;
         if (w2 > 0.f) s.update(r2.lightID, r2.bary, w2, state);
@@ -413,10 +363,10 @@ Reservoir CombineReservoirs(uint2 pixel, Reservoir r1, Reservoir r2, uint state)
 
     EmissiveTriangle triS = gScene.lightCollection.getTriangle(s.lightID);
     float3 lightPosS = EvalLightSamplePosW(triS, s.bary);
-    float3 wiS = normalize(lightPosS - surf.posW);
-    float3 brdfS = CalcBRDF(surf, wiS);
+    float3 wiS = normalize(lightPosS - surf.sd.posW);
+    float3 brdfS = CalcBRDF(surf, wiS, pixel);
     float3 contribS = brdfS * CalcLe(triS, s.bary) * CalcG(surf, triS, s.bary);
-    float phS = max(max(contribS.x, contribS.y), contribS.z);
+    float phS = luminance(contribS);
     phS = max(phS, 1e-6f);
     if (phS > 0.f) {
         s.W = s.wsum / ((float)s.M * phS);
@@ -436,20 +386,25 @@ void ReSTIR_TemporalReuse(uint3 dispatchThreadId: SV_DispatchThreadID) {
     if (pixel.x >= gFrameDim.x || pixel.y >= gFrameDim.y) {
         return;
     }
-    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    uint pixelIndex = pixel.y * gFrameDim.x + pixel.x;
     // get prev pixel
     uint2 prevP = getPrevPixel(pixel);
-    uint prevPixelIndex = prevP.y * (uint)gFrameDim.x + prevP.x;
+    uint prevPixelIndex = prevP.y * gFrameDim.x + prevP.x;
     // random seed
     uint randomState = initRandomSeed(pixel, gRandomSeed);
     // update
-    gReservoir[pixelIndex] = CombineReservoirs(pixel, gReservoir[pixelIndex],
-         gPrevReservoir[prevPixelIndex], randomState);
+    Surface surf = DecodeSurfaceFromHit(pixel);
+    Surface prevSurf = DecodeSurfaceFromHit(prevP);
+    Reservoir prevR = gPrevReservoir[prevPixelIndex];
+    if (!areSurfacesCompatible(surf, prevSurf))
+    {
+        prevR = Reservoir();
+    }
+
+    gReservoir[pixelIndex] = CombineReservoirs(pixel, surf, gReservoir[pixelIndex], prevR, randomState);
 }
-Reservoir combineReservoirSet(uint2 pixel, Reservoir rs[9], uint count,uint state) {
+Reservoir combineReservoirSet(uint2 pixel, const Surface surf, Reservoir rs[9], uint count, uint state) {
     Reservoir s = Reservoir();
-    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
-    Surface surf = gSurfaceData[pixelIndex];
     if (surf.valid == 0) return s;
     uint sumM = 0;
     for (uint i = 0; i < 9; i++) {
@@ -459,10 +414,10 @@ Reservoir combineReservoirSet(uint2 pixel, Reservoir rs[9], uint count,uint stat
         if (r.M == 0 || r.W <= 0.f) continue;
         EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
         float3 lightPos = EvalLightSamplePosW(tri, r.bary);
-        float3 wi = normalize(lightPos - surf.posW);
-        float3 brdf = CalcBRDF(surf, wi);
+        float3 wi = normalize(lightPos - surf.sd.posW);
+        float3 brdf = CalcBRDF(surf, wi,pixel);
         float3 contrib = brdf * CalcLe(tri, r.bary) * CalcG(surf, tri, r.bary);
-        float ph = max(max(contrib.x, contrib.y), contrib.z);
+        float ph = luminance(contrib);
         ph = max(ph, 1e-6f);
         s.update(r.lightID, r.bary, r.W * ph * r.M, state);
     }
@@ -473,10 +428,10 @@ Reservoir combineReservoirSet(uint2 pixel, Reservoir rs[9], uint count,uint stat
     }
     EmissiveTriangle tri = gScene.lightCollection.getTriangle(s.lightID);
     float3 lightPos = EvalLightSamplePosW(tri, s.bary);
-    float3 wi = normalize(lightPos - surf.posW);
-    float3 brdf = CalcBRDF(surf, wi);
+    float3 wi = normalize(lightPos - surf.sd.posW);
+    float3 brdf = CalcBRDF(surf, wi, pixel);
     float3 contrib = brdf * CalcLe(tri, s.bary) * CalcG(surf, tri, s.bary);
-    float ph = max(max(contrib.x, contrib.y), contrib.z);
+    float ph = luminance(contrib);
     ph = max(ph, 1e-6f);
     if (ph <= 0.f) {
         s.W = 0.f;
@@ -493,23 +448,33 @@ Reservoir combineReservoirSet(uint2 pixel, Reservoir rs[9], uint count,uint stat
 void ReSTIR_SpatialReuse(uint3 dispatchThreadId: SV_DispatchThreadID) {
     uint2 pixel = dispatchThreadId.xy;
     if (pixel.x >= gFrameDim.x || pixel.y >= gFrameDim.y) return;
-    uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
+    uint pixelIndex = pixel.y * gFrameDim.x + pixel.x;
     uint randomState = initRandomSeed(pixel, gRandomSeed);
+    Surface surf = DecodeSurfaceFromHit(pixel);
+    if (surf.valid == 0) {
+        gReservoir[pixelIndex] = Reservoir();
+        return;
+    }
     Reservoir rs[9];
     uint count = 0;
     for (int i = -1; i <= 1; i++) {
         for (int j = -1; j <= 1; j++) {
             int2 p = (int2)pixel;
             p = p + int2(i, j);
-            if (p.x < 0 || p.x >= (int)gFrameDim.x || p.y < 0 || p.y >= (int)gFrameDim.y) {
+            if (p.x < 0 || p.x >= gFrameDim.x || p.y < 0 || p.y >= gFrameDim.y) {
                 continue;
             }
-            uint index = (uint)p.y * (uint)gFrameDim.x + (uint)p.x;
+            uint2 np = uint2(p);
+            Surface ns = DecodeSurfaceFromHit(np);
+            if (!areSurfacesCompatible(surf, ns)) {
+                continue;
+            }
+            uint index = np.y * gFrameDim.x + np.x;
             rs[count] = gPrevReservoir[index];
             count++;
         }
     }
-    Reservoir r = combineReservoirSet(pixel, rs, count, randomState);
+    Reservoir r = combineReservoirSet(pixel, surf, rs, count, randomState);
     gReservoir[pixelIndex] = r;
 }
 // ========================
@@ -522,16 +487,38 @@ void ReSTIR_ShadeColor(uint3 dispatchThreadId: SV_DispatchThreadID) {
     if (pixel.x >= gFrameDim.x || pixel.y >= gFrameDim.y) return;
     uint pixelIndex = pixel.y * (uint)gFrameDim.x + pixel.x;
     Reservoir r = gReservoir[pixelIndex];
-    Surface surf = gSurfaceData[pixelIndex];
+    Surface surf = DecodeSurfaceFromHit(pixel);
     if (surf.valid == 0 || r.M == 0 || r.W <= 0) {
         color[pixel] = float4(0, 0, 0, 1);
         return;
     }
     EmissiveTriangle tri = gScene.lightCollection.getTriangle(r.lightID);
     float3 lightPos = EvalLightSamplePosW(tri, r.bary);
-    float3 wi = normalize(lightPos - surf.posW);
-    float3 f = CalcBRDF(surf, wi) * CalcLe(tri, r.bary);
+    float3 toLight = lightPos - surf.sd.posW;
+    float dist = length(toLight);
+    if (dist <= 1e-4f) {
+        color[pixel] = float4(0, 0, 0, 1);
+        return;
+    }
+
+    float3 wi = toLight / dist;
+    SceneRayQuery<1> rayQuery;
+    bool visible = rayQuery.traceVisibilityRay(Ray(surf.sd.computeRayOrigin(), wi, 0.f, max(dist - 2e-3f, 0.f)));
+    if (!visible) {
+        let lod = ExplicitLodTextureSampler(0.0f);
+        let hints = getMaterialInstanceHints();
+        let mi = gScene.materials.getMaterialInstance(surf.sd, lod, hints);
+        let props = mi.getProperties(surf.sd);
+        color[pixel] = float4(props.emission, 1);
+        return;
+    }
+
+    float3 f = CalcBRDF(surf, wi, pixel) * CalcLe(tri, r.bary);
     float g = CalcG(surf, tri, r.bary);
-    float3 Lo = f * g * r.W + surf.emission;
+    let lod = ExplicitLodTextureSampler(0.0f);
+    let hints = getMaterialInstanceHints();
+    let mi = gScene.materials.getMaterialInstance(surf.sd, lod, hints);
+    let props = mi.getProperties(surf.sd);
+    float3 Lo = f * g * r.W + props.emission;
     color[pixel] = float4(Lo, 1);
 }

@@ -100,11 +100,12 @@ void ReSTIR_DI::setScene(RenderContext* pRenderContext, const ref<Scene>& pScene
 
     mpReservoirBuffer = nullptr;
     mpPrevReservoirBuffer = nullptr;
-    mpSurfaceBuffer = nullptr;
     mpAliasProbBuffer = nullptr;
     mpAliasIndexBuffer = nullptr;
+    mpLightPmfBuffer = nullptr;
     mReservoirElementCount = 0;
     mAliasElementCount = 0;
+    mResetHistory = true;
 }
 
 void ReSTIR_DI::recreatePrograms()
@@ -119,25 +120,26 @@ void ReSTIR_DI::recreatePrograms()
 void ReSTIR_DI::prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount)
 {
     const uint32_t pixelCount = mFrameDim.x * mFrameDim.y;
-    if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer || !mpSurfaceBuffer)
+    if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer)
     {
         mReservoirElementCount = pixelCount;
         mpReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gReservoir"], mReservoirElementCount);
         mpPrevReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gPrevReservoir"], mReservoirElementCount);
-        mpSurfaceBuffer = mpDevice->createStructuredBuffer(rootVar["gSurfaceData"], mReservoirElementCount);
         mpReservoirBuffer->setName("ReSTIR_DI::Reservoir");
         mpPrevReservoirBuffer->setName("ReSTIR_DI::PrevReservoir");
-        mpSurfaceBuffer->setName("ReSTIR_DI::SurfaceData");
+        mResetHistory = true;
     }
 
     const uint32_t aliasCount = std::max(lightCount, 1u);
-    if (aliasCount != mAliasElementCount || !mpAliasProbBuffer || !mpAliasIndexBuffer)
+    if (aliasCount != mAliasElementCount || !mpAliasProbBuffer || !mpAliasIndexBuffer || !mpLightPmfBuffer)
     {
         mAliasElementCount = aliasCount;
         mpAliasProbBuffer = mpDevice->createStructuredBuffer(rootVar["gAliasProb"], aliasCount);
         mpAliasIndexBuffer = mpDevice->createStructuredBuffer(rootVar["gAliasIndex"], aliasCount);
+        mpLightPmfBuffer = mpDevice->createStructuredBuffer(rootVar["gLightPmf"], aliasCount);
         mpAliasProbBuffer->setName("ReSTIR_DI::AliasProb");
         mpAliasIndexBuffer->setName("ReSTIR_DI::AliasIndex");
+        mpLightPmfBuffer->setName("ReSTIR_DI::LightPmf");
     }
 }
 
@@ -148,6 +150,7 @@ void ReSTIR_DI::updateAliasTable(RenderContext* pRenderContext, const ref<LightC
 {
     const uint32_t aliasCount = std::max(lightCount, 1u);
     std::vector<float> probs(aliasCount, 1.f);
+    std::vector<float> pmf(aliasCount, 1.f);
     std::vector<uint32_t> indices(aliasCount, 0u);
 
     if (lightCount > 0 && pLights)
@@ -168,6 +171,8 @@ void ReSTIR_DI::updateAliasTable(RenderContext* pRenderContext, const ref<LightC
 
         if (sumWeight > 0.f)
         {
+            for (uint32_t i = 0; i < lightCount; ++i) pmf[i] = weights[i] / sumWeight;
+
             std::vector<float> scaled(lightCount);
             std::vector<uint32_t> small;
             std::vector<uint32_t> large;
@@ -217,14 +222,16 @@ void ReSTIR_DI::updateAliasTable(RenderContext* pRenderContext, const ref<LightC
             for (uint32_t i = 0; i < lightCount; ++i)
             {
                 probs[i] = 1.f;
+                pmf[i] = 1.f / std::max(lightCount, 1u);
                 indices[i] = i;
             }
         }
     }
 
-    FALCOR_ASSERT(mpAliasProbBuffer && mpAliasIndexBuffer);
+    FALCOR_ASSERT(mpAliasProbBuffer && mpAliasIndexBuffer && mpLightPmfBuffer);
     mpAliasProbBuffer->setBlob(probs.data(), 0, sizeof(float) * aliasCount);
     mpAliasIndexBuffer->setBlob(indices.data(), 0, sizeof(uint32_t) * aliasCount);
+    mpLightPmfBuffer->setBlob(pmf.data(), 0, sizeof(float) * aliasCount);
 }
 
 void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderData)
@@ -310,15 +317,15 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
 
         rootVar["gReservoir"] = pReservoir ? pReservoir : mpReservoirBuffer;
         rootVar["gPrevReservoir"] = pPrevReservoir ? pPrevReservoir : mpPrevReservoirBuffer;
-        rootVar["gSurfaceData"] = mpSurfaceBuffer;
         rootVar["gAliasProb"] = mpAliasProbBuffer;
         rootVar["gAliasIndex"] = mpAliasIndexBuffer;
+        rootVar["gLightPmf"] = mpLightPmfBuffer;
         rootVar["vbuffer"] = pVBuffer;
         rootVar["mvec"] = pMotionVectors;
 
         auto cb = rootVar["CB"];
         cb["gRIS_M"] = mRISSampleCount;
-        cb["gFrameDim"] = float2((float)mFrameDim.x, (float)mFrameDim.y);
+        cb["gFrameDim"] = mFrameDim;
         cb["gFrameIndex"] = mFrameIndex;
         cb["gRandomSeed"] = getSeed();
     };
@@ -330,8 +337,12 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
         lightCount = (uint32_t)pLights->getMeshLightTriangles(pRenderContext).size();
     }
     prepareBuffers(mpInitPass->getRootVar(), lightCount);
-    // Ensure previous-frame reservoir is cleared on first frame (or after resize) to avoid uninitialized data.
-    pRenderContext->clearUAV(mpPrevReservoirBuffer->getUAV().get(), uint4(0));
+    // Clear history only when needed to keep temporal reuse stable.
+    if (mResetHistory || mFrameIndex == 0)
+    {
+        pRenderContext->clearUAV(mpPrevReservoirBuffer->getUAV().get(), uint4(0));
+        mResetHistory = false;
+    }
 
     updateAliasTable(pRenderContext, pLights, lightCount);
 

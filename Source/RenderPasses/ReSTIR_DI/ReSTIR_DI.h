@@ -66,9 +66,9 @@ private:
 
     ref<Buffer> mpReservoirBuffer;
     ref<Buffer> mpPrevReservoirBuffer;
-    ref<Buffer> mpSurfaceBuffer;
     ref<Buffer> mpAliasProbBuffer;
     ref<Buffer> mpAliasIndexBuffer;
+    ref<Buffer> mpLightPmfBuffer;
 
     uint2 mFrameDim = uint2(0, 0);
     uint32_t mFrameIndex = 0;
@@ -76,4 +76,5 @@ private:
     uint32_t mSpatialReuseCount = 1;
     uint32_t mReservoirElementCount = 0;
     uint32_t mAliasElementCount = 0;
+    bool mResetHistory = true;
 };
