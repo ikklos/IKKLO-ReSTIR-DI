@@ -291,6 +291,9 @@ target_sources(Falcor PRIVATE
     Rendering/RTXDI/ReflectTypes.cs.slang
     Rendering/RTXDI/RTXDI.cpp
     Rendering/RTXDI/RTXDI.h
+    Rendering/RTDI/RTDI.cpp
+    Rendering/RTDI/RTDI.h
+    Rendering/RTDI/RTDI.slang
     Rendering/RTXDI/RTXDI.slang
     Rendering/RTXDI/RTXDIApplicationBridge.slangh
     Rendering/RTXDI/RTXDISDK.cpp
@@ -1058,3 +1061,4 @@ endif()
 if(FALCOR_LINUX)
     file(GENERATE OUTPUT ${FALCOR_OUTPUT_DIRECTORY}/setpath.sh INPUT ${CMAKE_SOURCE_DIR}/build_scripts/setpath.sh.in)
 endif()
+

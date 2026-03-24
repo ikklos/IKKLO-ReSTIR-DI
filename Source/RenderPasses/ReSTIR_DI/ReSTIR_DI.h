@@ -28,6 +28,7 @@
 #pragma once
 #include "Falcor.h"
 #include "RenderGraph/RenderPass.h"
+#include "Rendering/RTDI/RTDI.h"
 
 using namespace Falcor;
 
@@ -53,28 +54,7 @@ public:
     virtual bool onKeyEvent(const KeyboardEvent& keyEvent) override { return false; }
 
 private:
-    void recreatePrograms();
-    void prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount);
-    void updateAliasTable(RenderContext* pRenderContext, const ref<LightCollection>& pLights, uint32_t lightCount);
-
     ref<Scene> mpScene;
-    ref<ComputePass> mpInitPass;
-    ref<ComputePass> mpVisibilityPass;
-    ref<ComputePass> mpTemporalPass;
-    ref<ComputePass> mpSpatialPass;
-    ref<ComputePass> mpShadePass;
-
-    ref<Buffer> mpReservoirBuffer;
-    ref<Buffer> mpPrevReservoirBuffer;
-    ref<Buffer> mpAliasProbBuffer;
-    ref<Buffer> mpAliasIndexBuffer;
-    ref<Buffer> mpLightPmfBuffer;
-
-    uint2 mFrameDim = uint2(0, 0);
-    uint32_t mFrameIndex = 0;
-    uint32_t mRISSampleCount = 8;
-    uint32_t mSpatialReuseCount = 1;
-    uint32_t mReservoirElementCount = 0;
-    uint32_t mAliasElementCount = 0;
-    bool mResetHistory = true;
+    std::unique_ptr<RTDI> mpRTDI;
+    RTDI::Options mOptions;
 };

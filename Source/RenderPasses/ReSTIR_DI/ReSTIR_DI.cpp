@@ -27,8 +27,6 @@
  **************************************************************************/
 #include "ReSTIR_DI.h"
 #include <algorithm>
-#include <iostream>
-#include <random>
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
 {
@@ -37,22 +35,13 @@ extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registr
 
 namespace
 {
-const std::string kShaderFile = "RenderPasses/ReSTIR_DI/ReSTIR.cs.slang";
-const char kInitEntry[] = "ReSTIR_Init";
-const char kVisibilityEntry[] = "ReSTIR_Visibility";
-const char kTemporalEntry[] = "ReSTIR_TemporalReuse";
-const char kSpatialEntry[] = "ReSTIR_SpatialReuse";
-const char kShadeEntry[] = "ReSTIR_ShadeColor";
 const char kInputVBuffer[] = "vbuffer";
 const char kInputMVec[] = "mvec";
 const char kOutputColor[] = "color";
 const char kRISSampleCount[] = "risSampleCount";
 const char kSpatialReuseCount[] = "spatialReuseCount";
-}
-uint32_t getSeed(){
-    static thread_local std::mt19937 mt{std::random_device{}()};
-    static thread_local std::uniform_int_distribution<uint32_t> dist(0,UINT32_MAX);
-    return dist(mt);
+const char kDebugShowWExplosion[] = "debugShowWExplosion";
+const char kDebugWThreshold[] = "debugWThreshold";
 }
 
 ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(pDevice)
@@ -60,23 +49,33 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
     for (const auto& [key, value] : props)
     {
         if (key == kRISSampleCount)
-            mRISSampleCount = value;
-        else if(key == kSpatialReuseCount)
-            mSpatialReuseCount = value;
+            mOptions.risSampleCount = value;
+        else if (key == kSpatialReuseCount)
+            mOptions.spatialReuseCount = value;
+        else if (key == kDebugShowWExplosion)
+            mOptions.debugShowWExplosion = value;
+        else if (key == kDebugWThreshold)
+            mOptions.debugWThreshold = value;
         else
             logWarning("Unknown property '{}' in ReSTIR_DI properties.", key);
     }
+
+    mOptions.risSampleCount = std::max(mOptions.risSampleCount, 1u);
+    mOptions.spatialReuseCount = std::max(mOptions.spatialReuseCount, 1u);
+    mOptions.debugWThreshold = std::max(mOptions.debugWThreshold, 0.1f);
 }
 
 Properties ReSTIR_DI::getProperties() const
 {
     Properties props;
-    props[kRISSampleCount] = mRISSampleCount;
-    props[kSpatialReuseCount] = mSpatialReuseCount;
+    props[kRISSampleCount] = mOptions.risSampleCount;
+    props[kSpatialReuseCount] = mOptions.spatialReuseCount;
+    props[kDebugShowWExplosion] = mOptions.debugShowWExplosion;
+    props[kDebugWThreshold] = mOptions.debugWThreshold;
     return props;
 }
 
-RenderPassReflection ReSTIR_DI::reflect(const CompileData& compileData)
+RenderPassReflection ReSTIR_DI::reflect(const CompileData& /*compileData*/)
 {
     RenderPassReflection reflector;
     reflector.addInput(kInputVBuffer, "Visibility buffer in packed format").bindFlags(ResourceBindFlags::ShaderResource);
@@ -87,292 +86,39 @@ RenderPassReflection ReSTIR_DI::reflect(const CompileData& compileData)
     return reflector;
 }
 
-void ReSTIR_DI::compile(RenderContext* pRenderContext, const CompileData& compileData)
+void ReSTIR_DI::compile(RenderContext* /*pRenderContext*/, const CompileData& /*compileData*/)
 {
-    mFrameDim = compileData.defaultTexDims;
 }
 
-void ReSTIR_DI::setScene(RenderContext* pRenderContext, const ref<Scene>& pScene)
+void ReSTIR_DI::setScene(RenderContext* /*pRenderContext*/, const ref<Scene>& pScene)
 {
     mpScene = pScene;
-    mFrameIndex = 0;
-    recreatePrograms();
+    mpRTDI = nullptr;
 
-    mpReservoirBuffer = nullptr;
-    mpPrevReservoirBuffer = nullptr;
-    mpAliasProbBuffer = nullptr;
-    mpAliasIndexBuffer = nullptr;
-    mpLightPmfBuffer = nullptr;
-    mReservoirElementCount = 0;
-    mAliasElementCount = 0;
-    mResetHistory = true;
-}
-
-void ReSTIR_DI::recreatePrograms()
-{
-    mpInitPass = nullptr;
-    mpVisibilityPass = nullptr;
-    mpTemporalPass = nullptr;
-    mpSpatialPass = nullptr;
-    mpShadePass = nullptr;
-}
-
-void ReSTIR_DI::prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount)
-{
-    const uint32_t pixelCount = mFrameDim.x * mFrameDim.y;
-    if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer)
-    {
-        mReservoirElementCount = pixelCount;
-        mpReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gReservoir"], mReservoirElementCount);
-        mpPrevReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gPrevReservoir"], mReservoirElementCount);
-        mpReservoirBuffer->setName("ReSTIR_DI::Reservoir");
-        mpPrevReservoirBuffer->setName("ReSTIR_DI::PrevReservoir");
-        mResetHistory = true;
-    }
-
-    const uint32_t aliasCount = std::max(lightCount, 1u);
-    if (aliasCount != mAliasElementCount || !mpAliasProbBuffer || !mpAliasIndexBuffer || !mpLightPmfBuffer)
-    {
-        mAliasElementCount = aliasCount;
-        mpAliasProbBuffer = mpDevice->createStructuredBuffer(rootVar["gAliasProb"], aliasCount);
-        mpAliasIndexBuffer = mpDevice->createStructuredBuffer(rootVar["gAliasIndex"], aliasCount);
-        mpLightPmfBuffer = mpDevice->createStructuredBuffer(rootVar["gLightPmf"], aliasCount);
-        mpAliasProbBuffer->setName("ReSTIR_DI::AliasProb");
-        mpAliasIndexBuffer->setName("ReSTIR_DI::AliasIndex");
-        mpLightPmfBuffer->setName("ReSTIR_DI::LightPmf");
-    }
-}
-
-/**
- * @brief 根据flux构建发光三角形列表的Alias表
- */
-void ReSTIR_DI::updateAliasTable(RenderContext* pRenderContext, const ref<LightCollection>& pLights, uint32_t lightCount)
-{
-    const uint32_t aliasCount = std::max(lightCount, 1u);
-    std::vector<float> probs(aliasCount, 1.f);
-    std::vector<float> pmf(aliasCount, 1.f);
-    std::vector<uint32_t> indices(aliasCount, 0u);
-
-    if (lightCount > 0 && pLights)
-    {
-        pLights->prepareSyncCPUData(pRenderContext);
-        const auto& triangles = pLights->getMeshLightTriangles(pRenderContext);
-        const uint32_t triCount = std::min(lightCount, (uint32_t)triangles.size());
-
-        std::vector<float> weights(lightCount, 0.f);
-        float sumWeight = 0.f;
-        for (uint32_t i = 0; i < triCount; ++i)
-        {
-            const float w = std::max(0.f, triangles[i].flux);
-            weights[i] = w;
-            sumWeight += w;
-            indices[i] = i;
-        }
-
-        if (sumWeight > 0.f)
-        {
-            for (uint32_t i = 0; i < lightCount; ++i) pmf[i] = weights[i] / sumWeight;
-
-            std::vector<float> scaled(lightCount);
-            std::vector<uint32_t> small;
-            std::vector<uint32_t> large;
-            small.reserve(lightCount);
-            large.reserve(lightCount);
-
-            const float scale = (float)lightCount / sumWeight;
-            for (uint32_t i = 0; i < lightCount; ++i)
-            {
-                scaled[i] = weights[i] * scale;
-                if (scaled[i] < 1.f)
-                    small.push_back(i);
-                else
-                    large.push_back(i);
-            }
-
-            while (!small.empty() && !large.empty())
-            {
-                const uint32_t s = small.back();
-                small.pop_back();
-                const uint32_t l = large.back();
-
-                probs[s] = std::clamp(scaled[s], 0.f, 1.f);
-                indices[s] = l;
-
-                scaled[l] = (scaled[l] + scaled[s]) - 1.f;
-                if (scaled[l] < 1.f)
-                {
-                    large.pop_back();
-                    small.push_back(l);
-                }
-            }
-
-            for (uint32_t i : large)
-            {
-                probs[i] = 1.f;
-                indices[i] = i;
-            }
-            for (uint32_t i : small)
-            {
-                probs[i] = 1.f;
-                indices[i] = i;
-            }
-        }
-        else
-        {
-            for (uint32_t i = 0; i < lightCount; ++i)
-            {
-                probs[i] = 1.f;
-                pmf[i] = 1.f / std::max(lightCount, 1u);
-                indices[i] = i;
-            }
-        }
-    }
-
-    FALCOR_ASSERT(mpAliasProbBuffer && mpAliasIndexBuffer && mpLightPmfBuffer);
-    mpAliasProbBuffer->setBlob(probs.data(), 0, sizeof(float) * aliasCount);
-    mpAliasIndexBuffer->setBlob(indices.data(), 0, sizeof(uint32_t) * aliasCount);
-    mpLightPmfBuffer->setBlob(pmf.data(), 0, sizeof(float) * aliasCount);
+    if (mpScene)
+        mpRTDI = std::make_unique<RTDI>(mpScene, mOptions);
 }
 
 void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderData)
 {
-    if (!mpScene) return;
+    if (!mpScene || !mpRTDI)
+        return;
 
-    auto pVBuffer = renderData.getTexture(kInputVBuffer);
-    auto pMotionVectors = renderData.getTexture(kInputMVec);
-    auto pColor = renderData.getTexture(kOutputColor);
-    if (!pVBuffer || !pMotionVectors || !pColor) return;
+    const auto pVBuffer = renderData.getTexture(kInputVBuffer);
+    const auto pMotionVectors = renderData.getTexture(kInputMVec);
+    const auto pColor = renderData.getTexture(kOutputColor);
 
-    mFrameDim = uint2(pVBuffer->getWidth(), pVBuffer->getHeight());
-
-    // Keep emissive light data up to date for gScene.lightCollection usage in shader.
-    const auto& pLights = mpScene->getLightCollection(pRenderContext);
-    if (pLights) pLights->update(pRenderContext);
-
-    if (is_set(mpScene->getUpdates(), IScene::UpdateFlags::RecompileNeeded) ||
-        is_set(mpScene->getUpdates(), IScene::UpdateFlags::GeometryChanged))
-    {
-        recreatePrograms();
-    }
-
-    if (!mpInitPass)
-    {
-        ProgramDesc desc;
-        desc.addShaderModules(mpScene->getShaderModules());
-        desc.addShaderLibrary(kShaderFile).csEntry(kInitEntry);
-        desc.addTypeConformances(mpScene->getTypeConformances());
-
-        auto defines = mpScene->getSceneDefines();
-        mpInitPass = ComputePass::create(mpDevice, desc, defines, true);
-    }
-
-    if (!mpVisibilityPass)
-    {
-        ProgramDesc desc;
-        desc.addShaderModules(mpScene->getShaderModules());
-        desc.addShaderLibrary(kShaderFile).csEntry(kVisibilityEntry);
-        desc.addTypeConformances(mpScene->getTypeConformances());
-
-        auto defines = mpScene->getSceneDefines();
-        mpVisibilityPass = ComputePass::create(mpDevice, desc, defines, true);
-    }
-
-    if (!mpTemporalPass)
-    {
-        ProgramDesc desc;
-        desc.addShaderModules(mpScene->getShaderModules());
-        desc.addShaderLibrary(kShaderFile).csEntry(kTemporalEntry);
-        desc.addTypeConformances(mpScene->getTypeConformances());
-
-        auto defines = mpScene->getSceneDefines();
-        mpTemporalPass = ComputePass::create(mpDevice, desc, defines, true);
-    }
-
-    if (!mpSpatialPass)
-    {
-        ProgramDesc desc;
-        desc.addShaderModules(mpScene->getShaderModules());
-        desc.addShaderLibrary(kShaderFile).csEntry(kSpatialEntry);
-        desc.addTypeConformances(mpScene->getTypeConformances());
-
-        auto defines = mpScene->getSceneDefines();
-        mpSpatialPass = ComputePass::create(mpDevice, desc, defines, true);
-    }
-
-    if (!mpShadePass)
-    {
-        ProgramDesc desc;
-        desc.addShaderModules(mpScene->getShaderModules());
-        desc.addShaderLibrary(kShaderFile).csEntry(kShadeEntry);
-        desc.addTypeConformances(mpScene->getTypeConformances());
-
-        auto defines = mpScene->getSceneDefines();
-        mpShadePass = ComputePass::create(mpDevice, desc, defines, true);
-    }
-
-    auto bindCommonVars = [&](const ref<ComputePass>& pass, const ref<Buffer>& pReservoir = nullptr, const ref<Buffer>& pPrevReservoir = nullptr)
-    {
-        auto rootVar = pass->getRootVar();
-        mpScene->bindShaderData(rootVar["gScene"]);
-
-        rootVar["gReservoir"] = pReservoir ? pReservoir : mpReservoirBuffer;
-        rootVar["gPrevReservoir"] = pPrevReservoir ? pPrevReservoir : mpPrevReservoirBuffer;
-        rootVar["gAliasProb"] = mpAliasProbBuffer;
-        rootVar["gAliasIndex"] = mpAliasIndexBuffer;
-        rootVar["gLightPmf"] = mpLightPmfBuffer;
-        rootVar["vbuffer"] = pVBuffer;
-        rootVar["mvec"] = pMotionVectors;
-
-        auto cb = rootVar["CB"];
-        cb["gRIS_M"] = mRISSampleCount;
-        cb["gFrameDim"] = mFrameDim;
-        cb["gFrameIndex"] = mFrameIndex;
-        cb["gRandomSeed"] = getSeed();
-    };
-
-    uint32_t lightCount = 0u;
-    if (pLights)
-    {
-        pLights->prepareSyncCPUData(pRenderContext);
-        lightCount = (uint32_t)pLights->getMeshLightTriangles(pRenderContext).size();
-    }
-    prepareBuffers(mpInitPass->getRootVar(), lightCount);
-    // Clear history only when needed to keep temporal reuse stable.
-    if (mResetHistory || mFrameIndex == 0)
-    {
-        pRenderContext->clearUAV(mpPrevReservoirBuffer->getUAV().get(), uint4(0));
-        mResetHistory = false;
-    }
-
-    updateAliasTable(pRenderContext, pLights, lightCount);
-
-    bindCommonVars(mpInitPass);
-    mpInitPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
-
-    bindCommonVars(mpVisibilityPass);
-    mpVisibilityPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
-
-    bindCommonVars(mpTemporalPass);
-    mpTemporalPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
-
-    // Make temporal result the stable SRV input for spatial pass.
-    std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
-    for(uint i = 0; i < (uint)mSpatialReuseCount; i++){
-        bindCommonVars(mpSpatialPass);
-        mpSpatialPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
-        std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
-    }
-
-    // After spatial loop, the latest reservoir resides in mpPrevReservoirBuffer due the final swap.
-    bindCommonVars(mpShadePass, mpPrevReservoirBuffer, mpReservoirBuffer);
-    mpShadePass->getRootVar()["color"] = pColor;
-    mpShadePass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
-
-    mFrameIndex++;
+    mpRTDI->execute(pRenderContext, pVBuffer, pMotionVectors, pColor);
 }
 
 void ReSTIR_DI::renderUI(Gui::Widgets& widget)
 {
-    widget.var("RIS M", mRISSampleCount, 1u, 64u);
-    widget.var("Spatial Reuse times", mSpatialReuseCount, 1u, 5u);
+    bool dirty = false;
+    dirty |= widget.var("RIS M", mOptions.risSampleCount, 1u, 64u);
+    dirty |= widget.var("Spatial Reuse times", mOptions.spatialReuseCount, 1u, 5u);
+    dirty |= widget.checkbox("Debug W Explosion", mOptions.debugShowWExplosion);
+    dirty |= widget.var("W Explosion Threshold", mOptions.debugWThreshold, 0.1f, 100.f);
+
+    if (dirty && mpRTDI)
+        mpRTDI->setOptions(mOptions);
 }
