@@ -1,5 +1,11 @@
 import Rendering.RTDI.RTDI;
 
+[numthreads(256, 1, 1)]
+void ReSTIR_Presample(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    gRTDI.presampleLocalLights(dispatchThreadId.x);
+}
+
 [numthreads(16, 16, 1)]
 void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -29,3 +35,4 @@ void ReSTIR_ShadeColor(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     gRTDI.shadeColor(dispatchThreadId.xy);
 }
+

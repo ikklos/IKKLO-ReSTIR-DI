@@ -293,6 +293,11 @@ target_sources(Falcor PRIVATE
     Rendering/RTXDI/RTXDI.h
     Rendering/RTDI/RTDI.cpp
     Rendering/RTDI/RTDI.h
+    Rendering/RTDI/EnvLightUpdater.cs.slang
+    Rendering/RTDI/LightUpdater.cs.slang
+    Rendering/RTDI/PackedTypes.slang
+    Rendering/RTDI/PolymorphicLight.slang
+    Rendering/RTDI/SurfaceData.slang
     Rendering/RTDI/RTDI.slang
     Rendering/RTXDI/RTXDI.slang
     Rendering/RTXDI/RTXDIApplicationBridge.slangh
@@ -1061,4 +1066,5 @@ endif()
 if(FALCOR_LINUX)
     file(GENERATE OUTPUT ${FALCOR_OUTPUT_DIRECTORY}/setpath.sh INPUT ${CMAKE_SOURCE_DIR}/build_scripts/setpath.sh.in)
 endif()
+
 
