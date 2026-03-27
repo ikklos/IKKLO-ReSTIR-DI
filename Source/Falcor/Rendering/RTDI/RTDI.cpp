@@ -38,19 +38,21 @@ namespace Falcor
         const std::string kEnvLightUpdaterShaderFile = "Rendering/RTDI/EnvLightUpdater.cs.slang";
 
         const char kPresampleEntry[] = "ReSTIR_Presample";
+        const char kPresampleEnvEntry[] = "ReSTIR_PresampleEnv";
         const char kInitEntry[] = "ReSTIR_Init";
         const char kVisibilityEntry[] = "ReSTIR_Visibility";
         const char kTemporalEntry[] = "ReSTIR_TemporalReuse";
         const char kSpatialEntry[] = "ReSTIR_SpatialReuse";
         const char kShadeEntry[] = "ReSTIR_ShadeColor";
 
-        uint32_t getSeed()
+        /*
+         uint32_t getSeed()
         {
             static thread_local std::mt19937 mt{std::random_device{}()};
             static thread_local std::uniform_int_distribution<uint32_t> dist(0, UINT32_MAX);
             return dist(mt);
         }
-
+        */
         uint32_t getSquareDim(uint32_t elementCount)
         {
             uint32_t dim = 1;
@@ -81,6 +83,7 @@ namespace Falcor
     void RTDI::recreatePrograms()
     {
         mpPresamplePass = nullptr;
+        mpPresampleEnvPass = nullptr;
         mpUpdateLightsPass = nullptr;
         mpUpdateEnvLightPass = nullptr;
         mpInitPass = nullptr;
@@ -106,7 +109,7 @@ namespace Falcor
         return ComputePass::create(mpDevice, desc, defines, true);
     }
 
-    void RTDI::prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount)
+    void RTDI::prepareBuffers(const ShaderVar& rootVar)
     {
         const uint32_t pixelCount = mFrameDim.x * mFrameDim.y;
         if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer || !mpSurfaceDataBuffer)
@@ -121,24 +124,14 @@ namespace Falcor
             mResetHistory = true;
         }
 
-        const uint32_t aliasCount = std::max(lightCount, 1u);
-        if (aliasCount != mAliasElementCount || !mpAliasProbBuffer || !mpAliasIndexBuffer || !mpLightPmfBuffer)
-        {
-            mAliasElementCount = aliasCount;
-            mpAliasProbBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gAliasProb"], aliasCount);
-            mpAliasIndexBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gAliasIndex"], aliasCount);
-            mpLightPmfBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gLightPmf"], aliasCount);
-            mpAliasProbBuffer->setName("RTDI::AliasProb");
-            mpAliasIndexBuffer->setName("RTDI::AliasIndex");
-            mpLightPmfBuffer->setName("RTDI::LightPmf");
-        }
-
         const uint32_t presampledLightCount = std::max(mOptions.presampledTileCount * mOptions.presampledTileSize, 1u);
-        if (presampledLightCount != mPresampledLightElementCount || !mpPresampledLightIndexBuffer)
+        if (presampledLightCount != mPresampledLightElementCount || !mpPresampledLightIndexBuffer || !mpPresampledEnvDataBuffer)
         {
             mPresampledLightElementCount = presampledLightCount;
             mpPresampledLightIndexBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gPresampledLightIndex"], presampledLightCount);
+            mpPresampledEnvDataBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gPresampledEnvData"], presampledLightCount);
             mpPresampledLightIndexBuffer->setName("RTDI::PresampledLightIndex");
+            mpPresampledEnvDataBuffer->setName("RTDI::PresampledEnvData");
         }
     }
 
@@ -288,110 +281,6 @@ namespace Falcor
         mpEnvLightPdfTex->generateMips(pRenderContext);
     }
 
-    void RTDI::updateAliasTable(RenderContext* pRenderContext, const ref<LightCollection>& pLights, uint32_t lightCount)
-    {
-        const uint32_t aliasCount = std::max(lightCount, 1u);
-        std::vector<float> probs(aliasCount, 1.f);
-        std::vector<float> pmf(aliasCount, 1.f);
-        std::vector<uint32_t> indices(aliasCount, 0u);
-        std::vector<float> weights(aliasCount, 0.f);
-
-        if (lightCount > 0)
-        {
-            // Emissive range.
-            if (pLights && mLights.emissiveLightCount > 0)
-            {
-                pLights->prepareSyncCPUData(pRenderContext);
-                const auto& triangles = pLights->getMeshLightTriangles(pRenderContext);
-                uint32_t count = std::min(mLights.emissiveLightCount, (uint32_t)triangles.size());
-                for (uint32_t i = 0; i < count; ++i)
-                    weights[i] = std::max(0.f, triangles[i].flux);
-            }
-
-            // Analytic ranges.
-            for (uint32_t i = 0; i < mLights.analyticLightIDs.size(); ++i)
-            {
-                uint32_t idx = mLights.getFirstLocalAnalyticLight() + i;
-                if (idx >= lightCount) break;
-                uint32_t lightID = mLights.analyticLightIDs[i];
-                if (lightID < mpScene->getActiveAnalyticLights().size())
-                {
-                    auto pLight = mpScene->getActiveAnalyticLights()[lightID];
-                    const float3 I = pLight->getIntensity();
-                    const float lum = I.x * 0.2126f + I.y * 0.7152f + I.z * 0.0722f;
-                    weights[idx] = std::max(lum, 1e-3f);
-                }
-            }
-
-            // Env light.
-            if (mLights.envLightPresent)
-            {
-                uint32_t envIdx = mLights.getEnvLightIndex();
-                if (envIdx < lightCount) weights[envIdx] = 1.f;
-            }
-
-            float sumWeight = 0.f;
-            for (uint32_t i = 0; i < lightCount; ++i)
-            {
-                indices[i] = i;
-                sumWeight += weights[i];
-            }
-
-            if (sumWeight <= 0.f)
-            {
-                for (uint32_t i = 0; i < lightCount; ++i)
-                {
-                    probs[i] = 1.f;
-                    pmf[i] = 1.f / std::max(lightCount, 1u);
-                    indices[i] = i;
-                }
-            }
-            else
-            {
-                for (uint32_t i = 0; i < lightCount; ++i) pmf[i] = weights[i] / sumWeight;
-
-                std::vector<float> scaled(lightCount);
-                std::vector<uint32_t> small;
-                std::vector<uint32_t> large;
-                small.reserve(lightCount);
-                large.reserve(lightCount);
-
-                const float scale = (float)lightCount / sumWeight;
-                for (uint32_t i = 0; i < lightCount; ++i)
-                {
-                    scaled[i] = weights[i] * scale;
-                    if (scaled[i] < 1.f) small.push_back(i);
-                    else large.push_back(i);
-                }
-
-                while (!small.empty() && !large.empty())
-                {
-                    const uint32_t s = small.back();
-                    small.pop_back();
-                    const uint32_t l = large.back();
-
-                    probs[s] = std::clamp(scaled[s], 0.f, 1.f);
-                    indices[s] = l;
-
-                    scaled[l] = (scaled[l] + scaled[s]) - 1.f;
-                    if (scaled[l] < 1.f)
-                    {
-                        large.pop_back();
-                        small.push_back(l);
-                    }
-                }
-
-                for (uint32_t i : large) { probs[i] = 1.f; indices[i] = i; }
-                for (uint32_t i : small) { probs[i] = 1.f; indices[i] = i; }
-            }
-        }
-
-        FALCOR_ASSERT(mpAliasProbBuffer && mpAliasIndexBuffer && mpLightPmfBuffer);
-        mpAliasProbBuffer->setBlob(probs.data(), 0, sizeof(float) * aliasCount);
-        mpAliasIndexBuffer->setBlob(indices.data(), 0, sizeof(uint32_t) * aliasCount);
-        mpLightPmfBuffer->setBlob(pmf.data(), 0, sizeof(float) * aliasCount);
-    }
-
     void RTDI::execute(
         RenderContext* pRenderContext,
         const ref<Texture>& pVBuffer,
@@ -416,6 +305,7 @@ namespace Falcor
         if (!mpUpdateLightsPass) mpUpdateLightsPass = createComputePass(kLightUpdaterShaderFile, "main");
         if (!mpUpdateEnvLightPass) mpUpdateEnvLightPass = createComputePass(kEnvLightUpdaterShaderFile, "main");
         if (!mpPresamplePass) mpPresamplePass = createComputePass(kPresampleEntry);
+        if (!mpPresampleEnvPass) mpPresampleEnvPass = createComputePass(kPresampleEnvEntry);
         if (!mpInitPass) mpInitPass = createComputePass(kInitEntry);
         if (!mpVisibilityPass) mpVisibilityPass = createComputePass(kVisibilityEntry);
         if (!mpTemporalPass) mpTemporalPass = createComputePass(kTemporalEntry);
@@ -425,8 +315,7 @@ namespace Falcor
         updateLights(pRenderContext);
         updateEnvLight(pRenderContext);
 
-        uint32_t lightCount = mLights.getTotalLightCount();
-        prepareBuffers(mpInitPass->getRootVar(), lightCount);
+        prepareBuffers(mpInitPass->getRootVar());
 
         if (mResetHistory || mFrameIndex == 0)
         {
@@ -445,12 +334,10 @@ namespace Falcor
 
             var["gReservoir"] = pReservoir ? pReservoir : mpReservoirBuffer;
             var["gPrevReservoir"] = pPrevReservoir ? pPrevReservoir : mpPrevReservoirBuffer;
-            var["gAliasProb"] = mpAliasProbBuffer;
-            var["gAliasIndex"] = mpAliasIndexBuffer;
-            var["gLightPmf"] = mpLightPmfBuffer;
             var["gLightInfo"] = mpLightInfoBuffer;
             var["surfaceData"] = mpSurfaceDataBuffer;
             var["gPresampledLightIndex"] = mpPresampledLightIndexBuffer;
+            var["gPresampledEnvData"] = mpPresampledEnvDataBuffer;
             var["vbuffer"] = pVBuffer;
             var["mvec"] = pMotionVectors;
             var["localLightPdfTexture"] = mpLocalLightPdfTex;
@@ -481,6 +368,9 @@ namespace Falcor
         bindCommonVars(mpPresamplePass, 0x13579BDFu);
         const uint32_t presampleCount = std::max(mOptions.presampledTileCount * mOptions.presampledTileSize, 1u);
         mpPresamplePass->execute(pRenderContext, presampleCount, 1);
+
+        bindCommonVars(mpPresampleEnvPass, 0x55AA11EEu);
+        mpPresampleEnvPass->execute(pRenderContext, presampleCount, 1);
 
         bindCommonVars(mpInitPass, 0x2468ACE0u);
         mpInitPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);

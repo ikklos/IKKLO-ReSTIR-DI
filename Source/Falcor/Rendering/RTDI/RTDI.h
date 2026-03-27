@@ -81,10 +81,9 @@ namespace Falcor
         };
 
         void recreatePrograms();
-        void prepareBuffers(const ShaderVar& rootVar, uint32_t lightCount);
+        void prepareBuffers(const ShaderVar& rootVar);
         void updateLights(RenderContext* pRenderContext);
         void updateEnvLight(RenderContext* pRenderContext);
-        void updateAliasTable(RenderContext* pRenderContext, const ref<LightCollection>& pLights, uint32_t lightCount);
         ref<ComputePass> createComputePass(const char* entryPoint) const;
         ref<ComputePass> createComputePass(const std::string& file, const std::string& entryPoint) const;
 
@@ -92,6 +91,7 @@ namespace Falcor
         ref<Device> mpDevice;
 
         ref<ComputePass> mpPresamplePass;
+        ref<ComputePass> mpPresampleEnvPass;
         ref<ComputePass> mpUpdateLightsPass;
         ref<ComputePass> mpUpdateEnvLightPass;
         ref<ComputePass> mpInitPass;
@@ -102,13 +102,11 @@ namespace Falcor
 
         ref<Buffer> mpReservoirBuffer;
         ref<Buffer> mpPrevReservoirBuffer;
-        ref<Buffer> mpAliasProbBuffer;
-        ref<Buffer> mpAliasIndexBuffer;
-        ref<Buffer> mpLightPmfBuffer;
         ref<Buffer> mpLightInfoBuffer;
         ref<Buffer> mpAnalyticLightIDBuffer;
         ref<Buffer> mpSurfaceDataBuffer;
         ref<Buffer> mpPresampledLightIndexBuffer;
+        ref<Buffer> mpPresampledEnvDataBuffer;
         ref<Texture> mpLocalLightPdfTex;
         ref<Texture> mpEnvLightLuminanceTex;
         ref<Texture> mpEnvLightPdfTex;
@@ -116,7 +114,6 @@ namespace Falcor
         uint2 mFrameDim = uint2(0, 0);
         uint32_t mFrameIndex = 0;
         uint32_t mReservoirElementCount = 0;
-        uint32_t mAliasElementCount = 0;
         uint32_t mPresampledLightElementCount = 0;
         bool mResetHistory = true;
 

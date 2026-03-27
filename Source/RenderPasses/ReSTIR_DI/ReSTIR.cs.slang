@@ -6,6 +6,12 @@ void ReSTIR_Presample(uint3 dispatchThreadId : SV_DispatchThreadID)
     gRTDI.presampleLocalLights(dispatchThreadId.x);
 }
 
+[numthreads(256, 1, 1)]
+void ReSTIR_PresampleEnv(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    gRTDI.presampleEnvLights(dispatchThreadId.x);
+}
+
 [numthreads(16, 16, 1)]
 void ReSTIR_Init(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
