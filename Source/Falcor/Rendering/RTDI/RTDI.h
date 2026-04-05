@@ -44,9 +44,9 @@ namespace Falcor
             uint32_t spatialReuseCount = 1;
             uint32_t presampledTileCount = 128;
             uint32_t presampledTileSize = 256;
+            float normalThreshold = 0.5f;
+            float depthThreshold = 0.1f;
             uint useEmissiveTextures = 0u;
-            bool debugShowWExplosion = false;
-            float debugWThreshold = 4.f;
         };
 
         RTDI(ref<Scene> pScene, const Options& options = Options());

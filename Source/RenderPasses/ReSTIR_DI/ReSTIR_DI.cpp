@@ -42,9 +42,9 @@ const char kRISSampleCount[] = "risSampleCount";
 const char kSpatialReuseCount[] = "spatialReuseCount";
 const char kPresampledTileCount[] = "presampledTileCount";
 const char kPresampledTileSize[] = "presampledTileSize";
+const char kNormalThreshold[] = "normalThreshold";
+const char kDepthThreshold[] = "depthThreshold";
 const char kUseEmissiveTextures[] = "useEmissiveTextures";
-const char kDebugShowWExplosion[] = "debugShowWExplosion";
-const char kDebugWThreshold[] = "debugWThreshold";
 }
 
 ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(pDevice)
@@ -59,12 +59,12 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
             mOptions.presampledTileCount = value;
         else if (key == kPresampledTileSize)
             mOptions.presampledTileSize = value;
+        else if (key == kNormalThreshold)
+            mOptions.normalThreshold = value;
+        else if (key == kDepthThreshold)
+            mOptions.depthThreshold = value;
         else if (key == kUseEmissiveTextures)
             mOptions.useEmissiveTextures = value;
-        else if (key == kDebugShowWExplosion)
-            mOptions.debugShowWExplosion = value;
-        else if (key == kDebugWThreshold)
-            mOptions.debugWThreshold = value;
         else
             logWarning("Unknown property '{}' in ReSTIR_DI properties.", key);
     }
@@ -73,7 +73,8 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
     mOptions.spatialReuseCount = std::max(mOptions.spatialReuseCount, 1u);
     mOptions.presampledTileCount = std::clamp(mOptions.presampledTileCount, 1u, 1024u);
     mOptions.presampledTileSize = std::clamp(mOptions.presampledTileSize, 1u, 8192u);
-    mOptions.debugWThreshold = std::max(mOptions.debugWThreshold, 0.1f);
+    mOptions.normalThreshold = std::clamp(mOptions.normalThreshold, 0.f, 1.f);
+    mOptions.depthThreshold = std::clamp(mOptions.depthThreshold, 0.f, 1.f);
 }
 
 Properties ReSTIR_DI::getProperties() const
@@ -83,9 +84,9 @@ Properties ReSTIR_DI::getProperties() const
     props[kSpatialReuseCount] = mOptions.spatialReuseCount;
     props[kPresampledTileCount] = mOptions.presampledTileCount;
     props[kPresampledTileSize] = mOptions.presampledTileSize;
+    props[kNormalThreshold] = mOptions.normalThreshold;
+    props[kDepthThreshold] = mOptions.depthThreshold;
     props[kUseEmissiveTextures] = mOptions.useEmissiveTextures;
-    props[kDebugShowWExplosion] = mOptions.debugShowWExplosion;
-    props[kDebugWThreshold] = mOptions.debugWThreshold;
     return props;
 }
 
@@ -132,9 +133,9 @@ void ReSTIR_DI::renderUI(Gui::Widgets& widget)
     dirty |= widget.var("Spatial Reuse times", mOptions.spatialReuseCount, 1u, 5u);
     dirty |= widget.var("Presampled Tile Count", mOptions.presampledTileCount, 1u, 1024u);
     dirty |= widget.var("Presampled Tile Size", mOptions.presampledTileSize, 1u, 8192u);
+    dirty |= widget.var("Normal Threshold", mOptions.normalThreshold, 0.f, 1.f, 0.001f);
+    dirty |= widget.var("Depth Threshold", mOptions.depthThreshold, 0.f, 1.f, 0.001f);
     dirty |= widget.checkbox("Use Emissive Textures", mOptions.useEmissiveTextures);
-    dirty |= widget.checkbox("Debug W Explosion", mOptions.debugShowWExplosion);
-    dirty |= widget.var("W Explosion Threshold", mOptions.debugWThreshold, 0.1f, 100.f);
 
     if (dirty && mpRTDI)
         mpRTDI->setOptions(mOptions);

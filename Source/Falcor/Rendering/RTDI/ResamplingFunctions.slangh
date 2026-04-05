@@ -1,0 +1,51 @@
+import Reservoir;
+bool RTDI_CombineReservoirs(
+    inout Reservoir targetR,
+    Reservoir newR,
+    float random,
+    float targetP
+) {
+    return RTDI_CombineReservoirsInternal(
+        targetR,
+        newR,
+        random,
+        targetP,
+        newR.M * newR.W,
+        newR.M
+    );
+}
+bool RTDI_CombineReservoirsInternal(
+    inout Reservoir targetR,
+    Reservoir newR,
+    float random,
+    float targetP,
+    float sampleNormalization,
+    float sampleM
+) {
+    float risWeight = targetP * sampleNormalization;
+    targetR.M += sampleM;
+    targetR.wsum += risWeight;
+    if (random * targetR.wsum < risWeight) {
+        targetR.lightID = newR.lightID;
+        targetR.sampleUV = newR.sampleUV;
+        targetR.targetPdf = targetP;
+        return true;
+    }
+    return false;
+}
+/** calc W
+*/
+void RTDI_FinalizeResampling(
+    inout Reservoir reservoir,
+    float normalizationNumerator,
+    float normalizationDenominator
+) {
+    float denominator = reservoir.targetPdf * normalizationDenominator;
+
+    reservoir.W = (denominator == 0.0) ? 0.0 : (reservoir.wsum * normalizationNumerator) / denominator;
+}
+/**
+ */
+bool RTDI_IsValidReservoir(const Reservoir reservoir) {
+    return reservoir.lightID >= 0;
+}

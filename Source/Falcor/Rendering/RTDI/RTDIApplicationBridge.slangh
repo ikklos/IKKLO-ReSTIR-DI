@@ -1,0 +1,5 @@
+import SurfaceData;
+typedef SurfaceData RTAB_Surface
+float RTAB_GetSurfaceLinearDepth(SurfaceData surface) {
+    return max(0.f, surface.viewDepth);
+}

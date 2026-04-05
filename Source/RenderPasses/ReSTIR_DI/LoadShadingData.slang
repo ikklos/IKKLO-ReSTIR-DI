@@ -66,7 +66,6 @@ bool loadShadingData(const uint2 pixel, const uint2 frameDim, const Camera camer
         const VertexData v = gScene.getVertexData(triangleHit);
         const uint materialID = gScene.getMaterialID(triangleHit.instanceID);
         sd = gScene.materials.prepareShadingData(v, materialID, -rayDir);
-
         valid = true;
     }
 

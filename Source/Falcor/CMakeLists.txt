@@ -299,6 +299,10 @@ target_sources(Falcor PRIVATE
     Rendering/RTDI/PolymorphicLight.slang
     Rendering/RTDI/SurfaceData.slang
     Rendering/RTDI/RTDI.slang
+    Rendering/RTDI/RandomHelper.slang
+    Rendering/RTDI/Reservoir.slang
+    Rendering/RTDI/RTDIApplicationBridge.slangh
+    Rendering/RTDI/ResamplingFunctions.slangh
     Rendering/RTXDI/RTXDI.slang
     Rendering/RTXDI/RTXDIApplicationBridge.slangh
     Rendering/RTXDI/RTXDISDK.cpp

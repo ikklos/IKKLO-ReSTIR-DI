@@ -74,9 +74,9 @@ namespace Falcor
         mOptions.spatialReuseCount = std::max(options.spatialReuseCount, 1u);
         mOptions.presampledTileCount = std::clamp(options.presampledTileCount, 1u, 1024u);
         mOptions.presampledTileSize = std::clamp(options.presampledTileSize, 1u, 8192u);
+        mOptions.normalThreshold = std::clamp(options.normalThreshold, 0.f, 1.f);
+        mOptions.depthThreshold = std::clamp(options.depthThreshold, 0.f, 1.f);
         mOptions.useEmissiveTextures = options.useEmissiveTextures;
-        mOptions.debugShowWExplosion = options.debugShowWExplosion;
-        mOptions.debugWThreshold = std::max(options.debugWThreshold, 0.1f);
         mResetHistory = true;
     }
 
@@ -352,8 +352,8 @@ namespace Falcor
             cb["gFrameDim"] = mFrameDim;
             cb["gFrameIndex"] = mFrameIndex;
             cb["gRandomSeed"] = frameSeed ^ passSalt;
-            cb["gDebugShowWExplosion"] = mOptions.debugShowWExplosion ? 1u : 0u;
-            cb["gDebugWThreshold"] = mOptions.debugWThreshold;
+            cb["normalThreshold"] = mOptions.normalThreshold;
+            cb["depthThreshold"] = mOptions.depthThreshold;
             cb["useEmissiveTextures"] = mOptions.useEmissiveTextures;
 
             cb["firstLocalAnalyticLight"] = mLights.getFirstLocalAnalyticLight();
