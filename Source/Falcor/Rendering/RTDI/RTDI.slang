@@ -24,7 +24,9 @@ import Utils.Math.Ray;
 struct RTDI
 {
     // Runtime parameters.
-    uint gRIS_M;
+    uint gLocalRIS_M;
+    uint gInfiniteRIS_M;
+    uint gEnvRIS_M;
     uint gPresampledTileCount;
     uint gPresampledTileSize;
     uint2 gFrameDim;
@@ -42,6 +44,11 @@ struct RTDI
 
     uint currentSurfaceBufferIndex;
     uint prevSurfaceBufferIndex;
+    uint gNeighborOffsetMask;
+    float3 prevCameraU;
+    float3 prevCameraV;
+    float3 prevCameraW;
+    float2 prevCameraJitter;
 
     // Internal algorithm resources.
     RWStructuredBuffer<Reservoir> gReservoir;
@@ -50,15 +57,40 @@ struct RTDI
     StructuredBuffer<PackedPolymorphicLight> gLightInfo;
     RWStructuredBuffer<PackedSurfaceData> surfaceData;
 
-    RWStructuredBuffer<uint> gPresampledLightIndex;
+    RWStructuredBuffer<uint2> gPresampledLightIndex;
     RWStructuredBuffer<uint2> gPresampledEnvData;
-
+    Buffer<float2> gNeighborOffsetBuffer;
     Texture2D<PackedHitInfo> vbuffer;
     Texture2D<float2> mvec;
-    Texture2D<float> localLightPdfTexture;
-    Texture2D<float> envLightLuminanceTexture;
-    Texture2D<float> envLightPdfTexture;
+    Texture2D localLightPdfTexture;
+    Texture2D envLightLuminanceTexture;
+    Texture2D envLightPdfTexture;
     RWTexture2D<float4> color;
+
+    float3 computeRayDirection(uint2 pixel, bool previousFrame)
+    {
+        const float2 jitter = previousFrame
+            ? float2(-prevCameraJitter.x, prevCameraJitter.y)
+            : float2(-gScene.camera.data.jitterX, gScene.camera.data.jitterY);
+
+        const float2 p = (pixel + float2(0.5f, 0.5f)) / gFrameDim + jitter;
+        const float2 ndc = float2(2.f, -2.f) * p + float2(-1.f, 1.f);
+
+        const float3 cameraU = previousFrame ? prevCameraU : gScene.camera.data.cameraU;
+        const float3 cameraV = previousFrame ? prevCameraV : gScene.camera.data.cameraV;
+        const float3 cameraW = previousFrame ? prevCameraW : gScene.camera.data.cameraW;
+
+        return normalize(ndc.x * cameraU + ndc.y * cameraV + cameraW);
+    }
+
+    void discardReservoirSample(inout Reservoir r)
+    {
+        r.lightID = -1;
+        r.sampleUV = float2(0.f, 0.f);
+        r.W = 0.f;
+        r.wsum = 0.f;
+        r.targetPdf = 0.f;
+    }
 
     uint getSurfaceIndex(uint2 pixel, uint bufferIndex)
     {
@@ -98,8 +130,8 @@ struct RTDI
         float3 viewDir = float3(0.f, 0.f, 1.f);
         if (withViewDir)
         {
-            float3 toEye = gScene.camera.data.posW - asfloat(surfaceData[idx].position);
-            if (dot(toEye, toEye) > 0.f) viewDir = normalize(toEye);
+            bool previousFrame = (bufferIndex == prevSurfaceBufferIndex);
+            viewDir = -computeRayDirection(pixel, previousFrame);
         }
 
         sd = RTAB_Surface(surfaceData[idx], viewDir);
@@ -148,7 +180,7 @@ struct RTDI
         return samplePolymorphicLight(surf, lightID, sampleUV, false, ls);
     }
 
-        float sampleFromPdfMipTreeWithProb(Texture2D<float> tex, inout RH_RandomSamplerState randomState, out uint2 coord)
+        float sampleFromPdfMipTreeWithProb(Texture2D tex, inout RH_RandomSamplerState randomState, out uint2 coord)
     {
         uint2 dim0;
         uint mipCount;
@@ -198,7 +230,7 @@ struct RTDI
         return prob;
     }
 
-    float pdfTexelFromMipTree(Texture2D<float> tex, uint2 texel)
+    float pdfTexelFromMipTree(Texture2D tex, uint2 texel)
     {
         uint2 dim0;
         uint mipCount;
@@ -250,7 +282,7 @@ struct RTDI
             uint mipCount;
             uint2 dim;
             localLightPdfTexture.GetDimensions(0, dim.x, dim.y, mipCount);
-            localAvail = max(localLightPdfTexture.Load(int3(0, 0, int(mipCount - 1))), 0.f) > 0.f;
+            localAvail = max(localLightPdfTexture.Load(int3(0, 0, int(mipCount - 1))).x, 0.f) > 0.f;
         }
 
         if (envLightIndex < totalLightCount)
@@ -258,7 +290,7 @@ struct RTDI
             uint mipCount;
             uint2 dim;
             envLightPdfTexture.GetDimensions(0, dim.x, dim.y, mipCount);
-            envAvail = max(envLightPdfTexture.Load(int3(0, 0, int(mipCount - 1))), 0.f) > 0.f;
+            envAvail = max(envLightPdfTexture.Load(int3(0, 0, int(mipCount - 1))).x, 0.f) > 0.f;
         }
     }
 
@@ -273,11 +305,11 @@ struct RTDI
 
         uint2 texel = RTXDI_LinearIndexToZCurve(uint(lightID));
         if (any(texel >= dim)) return 0.f;
-        float texelValue = max(localLightPdfTexture.Load(int3(texel, 0)), 0.f);
+        float texelValue = max(localLightPdfTexture.Load(int3(texel, 0)).x, 0.f);
 
         int lastMip = max(0, int(floor(log2(max(dim.x, dim.y)))) - 1);
-        float avg0 = max(localLightPdfTexture.Load(int3(0, 0, lastMip)), 0.f);
-        float avg1 = max(localLightPdfTexture.Load(int3(1, 0, lastMip)), 0.f);
+        float avg0 = max(localLightPdfTexture.Load(int3(0, 0, lastMip)).x, 0.f);
+        float avg1 = max(localLightPdfTexture.Load(int3(1, 0, lastMip)).x, 0.f);
         float averageValue = 0.5f * (avg0 + avg1);
         float sum = averageValue * float(dim.x * dim.y);
         return (sum > 0.f) ? (texelValue / sum) : 0.f;
@@ -292,11 +324,11 @@ struct RTDI
 
         float2 uv = gScene.envMap.worldToUv(L);
         uint2 texel = min((uint2)(uv * float2(dim)), dim - 1);
-        float texelValue = max(envLightPdfTexture.Load(int3(texel, 0)), 0.f);
+        float texelValue = max(envLightPdfTexture.Load(int3(texel, 0)).x, 0.f);
 
         int lastMip = max(0, int(floor(log2(max(dim.x, dim.y)))) - 1);
-        float avg0 = max(envLightPdfTexture.Load(int3(0, 0, lastMip)), 0.f);
-        float avg1 = max(envLightPdfTexture.Load(int3(1, 0, lastMip)), 0.f);
+        float avg0 = max(envLightPdfTexture.Load(int3(0, 0, lastMip)).x, 0.f);
+        float avg1 = max(envLightPdfTexture.Load(int3(1, 0, lastMip)).x, 0.f);
         float averageValue = 0.5f * (avg0 + avg1);
         if (averageValue <= 0.f) return 0.f;
 
@@ -319,46 +351,6 @@ struct RTDI
         return 0.f;
     }
 
-    float calcProposalPdf(int lightID, PolymorphicLightSample ls)
-    {
-        float pCategory = calcCategorySelectionPdf(lightID);
-        if (pCategory <= 0.f) return 0.f;
-
-        float pSelect = 0.f;
-        if (lightID >= 0 && uint(lightID) < firstInfiniteAnalyticLight)
-        {
-            pSelect = pCategory * calcLocalLightSourcePdf(lightID);
-        }
-        else if (lightID >= 0 && uint(lightID) < envLightIndex)
-        {
-            uint count = envLightIndex - firstInfiniteAnalyticLight;
-            pSelect = pCategory * ((count > 0) ? (1.f / float(count)) : 0.f);
-        }
-        else if (lightID >= 0 && uint(lightID) == envLightIndex)
-        {
-            pSelect = pCategory * calcEnvironmentMapSamplingPdf(ls.direction);
-        }
-
-        if (pSelect <= 0.f) return 0.f;
-
-        float pCond = max(ls.pdf, 1e-6f);
-        return pSelect * pCond;
-    }
-
-    float calcw(RTAB_Surface surf, int lightID, float2 sampleUV, out float ph)
-    {
-        ph = 0.f;
-        if (lightID < 0 || uint(lightID) >= totalLightCount) return 0.f;
-
-        PolymorphicLightSample ls;
-        if (!samplePolymorphicLight(surf, lightID, sampleUV, true, ls)) return 0.f;
-
-        float p = calcProposalPdf(lightID, ls);
-        if (p <= 0.f) return 0.f;
-
-        ph = calcTargetPdf(surf, ls.direction, ls.Li);
-        return ph / max(p, 1e-6f);
-    }
 
     uint sampleFallbackLight(inout RH_RandomSamplerState randomState, uint lightCount)
     {
@@ -366,16 +358,16 @@ struct RTDI
         return p;
     }
 
-    float loadPdfSafe(Texture2D<float> tex, uint mip, int2 p)
+    float loadPdfSafe(Texture2D tex, uint mip, int2 p)
     {
         uint2 dim;
         uint mipCount;
         tex.GetDimensions(mip, dim.x, dim.y, mipCount);
         if (p.x < 0 || p.y < 0 || p.x >= int(dim.x) || p.y >= int(dim.y)) return 0.f;
-        return max(tex.Load(int3(p, mip)), 0.f);
+        return max(tex.Load(int3(p, mip)).x, 0.f);
     }
 
-    uint2 sampleFromPdfMipTree(Texture2D<float> tex, inout RH_RandomSamplerState randomState)
+    uint2 sampleFromPdfMipTree(Texture2D tex, inout RH_RandomSamplerState randomState)
     {
         uint2 coord;
         sampleFromPdfMipTreeWithProb(tex, randomState, coord);
@@ -495,22 +487,161 @@ struct RTDI
         return true;
     }
 
+    Reservoir buildCategoryReservoir(
+        RTAB_Surface surf,
+        uint sampleCount,
+        float sourceMisWeight,
+        float normalizationDenominator,
+        inout RH_RandomSamplerState randomState,
+        uint lightCategory,
+        uint tileIndex)
+    {
+        Reservoir r = Reservoir();
+        if (sampleCount == 0u) return r;
+
+        [loop]
+        for (uint i = 0; i < sampleCount; ++i)
+        {
+            int lightID = -1;
+            float2 uv = RH_GetNextRandom2D(randomState);
+            uint totalPresampled = max(gPresampledTileCount * gPresampledTileSize, 1u);
+            uint slot = (gPresampledTileSize > 0u) ? min((uint)(RH_GetNextRandom(randomState) * gPresampledTileSize), gPresampledTileSize - 1u) : 0u;
+            uint entry = min(tileIndex * max(gPresampledTileSize, 1u) + slot, totalPresampled - 1u);
+
+            if (lightCategory == 0u)
+            {
+                uint sampledLight = 0u;
+                if (gPresampledTileCount > 0u && gPresampledTileSize > 0u)
+                {
+                    uint2 presampled = gPresampledLightIndex[entry];
+                    sampledLight = presampled.x;
+                    if (sampledLight >= firstInfiniteAnalyticLight) continue;
+                }
+                else if (!sampleLocalLightFromPdfTexture(randomState, sampledLight))
+                {
+                    continue;
+                }
+                lightID = int(sampledLight);
+            }
+            else if (lightCategory == 1u)
+            {
+                uint sampledLight = 0u;
+                if (!sampleInfiniteAnalyticFromPmf(randomState, sampledLight)) continue;
+                lightID = int(sampledLight);
+            }
+            else
+            {
+                float2 envUv = float2(0.5f, 0.5f);
+                if (gPresampledTileCount > 0u && gPresampledTileSize > 0u)
+                {
+                    uint2 envSample = gPresampledEnvData[entry];
+                    if (envSample.y != 0u) envUv = unpackUv16(envSample.x);
+                    else if (!sampleEnvFromPdfTexture(randomState, envUv)) continue;
+                }
+                else if (!sampleEnvFromPdfTexture(randomState, envUv))
+                {
+                    continue;
+                }
+                lightID = int(envLightIndex);
+                uv = envUv;
+            }
+
+            float ph = 0.f;
+            float w = 0.f;
+            if (lightID >= 0)
+            {
+                PolymorphicLightSample ls;
+                if (samplePolymorphicLight(surf, lightID, uv, true, ls))
+                {
+                    float p = 0.f;
+                    if (lightCategory == 0u)
+                    {
+                        if (gPresampledTileCount > 0u && gPresampledTileSize > 0u)
+                        {
+                            uint2 presampled = gPresampledLightIndex[entry];
+                            float invSourcePdf = asfloat(presampled.y);
+                            float sourcePdf = (invSourcePdf > 0.f) ? (1.f / invSourcePdf) : 0.f;
+                            p = sourceMisWeight * sourcePdf;
+                        }
+                        else
+                        {
+                            p = sourceMisWeight * calcLocalLightSourcePdf(lightID);
+                        }
+                    }
+                    else if (lightCategory == 1u)
+                    {
+                        uint count = envLightIndex - firstInfiniteAnalyticLight;
+                        float pSelect = (count > 0u) ? (1.f / float(count)) : 0.f;
+                        p = pSelect;
+                    }
+                    else
+                    {
+                        if (gPresampledTileCount > 0u && gPresampledTileSize > 0u)
+                        {
+                            uint2 envSample = gPresampledEnvData[entry];
+                            float invSourcePdf = asfloat(envSample.y);
+                            float sourcePdf = (invSourcePdf > 0.f) ? (1.f / invSourcePdf) : 0.f;
+                            p = sourceMisWeight * sourcePdf;
+                        }
+                        else
+                        {
+                            p = sourceMisWeight * calcEnvironmentMapSamplingPdf(ls.direction);
+                        }
+                    }
+
+                    if (p > 0.f)
+                    {
+                        ph = calcTargetPdf(surf, ls.direction, ls.Li);
+                        w = ph / p;
+                    }
+                }
+            }
+
+            r.update(lightID, uv, w, ph, 1.f, randomState);
+        }
+
+        if (r.M > 0.f && r.targetPdf > 0.f)
+        {
+            float denom = max(normalizationDenominator, 1e-6f);
+            r.W = r.wsum / max(r.targetPdf * denom, 1e-6f);
+            r.M = 1.f;
+        }
+        else
+        {
+            r.W = 0.f;
+            r.M = (sampleCount > 0u) ? 1.f : 0.f;
+        }
+
+        return r;
+    }
+
     void presampleLocalLights(uint index)
     {
         uint total = max(gPresampledTileCount * gPresampledTileSize, 1u);
         if (index >= total) return;
 
-        if (totalLightCount == 0)
+        uint localCount = firstInfiniteAnalyticLight;
+        if (localCount == 0u)
         {
-            gPresampledLightIndex[index] = 0;
+            gPresampledLightIndex[index] = uint2(0u, 0u);
             return;
         }
 
         RH_RandomSamplerState state = RH_InitRandomState(uint2(index,index),gFrameIndex,1);
-        uint sampledLight;
-        float2 sampledUV;
-        sampleLightByPdf(state, sampledLight, sampledUV);
-        gPresampledLightIndex[index] = sampledLight;
+        uint sampledLight = 0u;
+        float invSourcePdf = 0.f;
+        if (sampleLocalLightFromPdfTexture(state, sampledLight))
+        {
+            float sourcePdf = calcLocalLightSourcePdf(int(sampledLight));
+            invSourcePdf = (sourcePdf > 0.f) ? (1.f / sourcePdf) : 0.f;
+        }
+        else
+        {
+            sampledLight = sampleFallbackLight(state, localCount);
+            float sourcePdf = (localCount > 0u) ? (1.f / float(localCount)) : 0.f;
+            invSourcePdf = (sourcePdf > 0.f) ? (1.f / sourcePdf) : 0.f;
+        }
+        gPresampledLightIndex[index] = uint2(sampledLight, asuint(invSourcePdf));
     }
 
     void presampleEnvLights(uint index)
@@ -590,64 +721,31 @@ struct RTDI
         bool validSurface = buildSurfaceData(pixel, surf);
         surfaceData[getSurfaceIndex(pixel, currentSurfaceBufferIndex)] = surf.pack();
 
-        static const int kMaxSampleCount = 64;
-        int n = clamp(gRIS_M, 0, kMaxSampleCount);
-        uint lightCount = totalLightCount;
         RH_RandomSamplerState randomState = RH_InitRandomState(pixel, gFrameIndex, 0);
+        RH_RandomSamplerState coherentState = RH_InitRandomState(pixel / 16u, gFrameIndex, 4);
 
         Reservoir r = Reservoir();
-        if (!validSurface || lightCount == 0 || n == 0)
+        if (!validSurface || totalLightCount == 0)
         {
             gReservoir[pixelIndex] = r;
             return;
         }
 
-        [unroll]
-        for (int i = 0; i < kMaxSampleCount; ++i)
-        {
-            if (i >= n) break;
+        uint numMisSamples = gLocalRIS_M + gEnvRIS_M;
+        float localMisWeight = (numMisSamples > 0u) ? (float(gLocalRIS_M) / float(numMisSamples)) : 0.f;
+        float envMisWeight = (numMisSamples > 0u) ? (float(gEnvRIS_M) / float(numMisSamples)) : 0.f;
+        uint localTileIndex = (gPresampledTileCount > 0u) ? min((uint)(RH_GetNextRandom(coherentState) * gPresampledTileCount), gPresampledTileCount - 1u) : 0u;
+        uint envTileIndex = (gPresampledTileCount > 0u) ? min((uint)(RH_GetNextRandom(coherentState) * gPresampledTileCount), gPresampledTileCount - 1u) : 0u;
 
-            int p = -1;
-            float2 uv = RH_GetNextRandom2D(randomState);
-            uint totalPresampled = max(gPresampledTileCount * gPresampledTileSize, 1u);
-            if (gPresampledTileCount > 0 && gPresampledTileSize > 0)
-            {
-                uint pixelLinear = pixel.y * gFrameDim.x + pixel.x;
-                uint tileId = (pixelLinear + (uint)i + gFrameIndex * 17u) % gPresampledTileCount;
-                uint slot = min((uint)(RH_GetNextRandom(randomState) * gPresampledTileSize), gPresampledTileSize - 1);
-                uint entry = min(tileId * gPresampledTileSize + slot, totalPresampled - 1);
-                p = int(min(gPresampledLightIndex[entry], lightCount - 1));
+        Reservoir localReservoir = buildCategoryReservoir(surf, gLocalRIS_M, localMisWeight, float(max(numMisSamples, 1u)), randomState, 0u, localTileIndex);
+        Reservoir infiniteReservoir = buildCategoryReservoir(surf, gInfiniteRIS_M, 1.f, float(max(gInfiniteRIS_M, 1u)), randomState, 1u, 0u);
+        Reservoir envReservoir = buildCategoryReservoir(surf, gEnvRIS_M, envMisWeight, float(max(numMisSamples, 1u)), randomState, 2u, envTileIndex);
 
-                if (p >= 0 && uint(p) == envLightIndex)
-                {
-                    uint2 envSample = gPresampledEnvData[entry];
-                    if (envSample.y != 0u) uv = unpackUv16(envSample.x);
-                    else
-                    {
-                        float2 envUv;
-                        if (sampleEnvFromPdfTexture(randomState, envUv)) uv = envUv;
-                    }
-                }
-            }
-            else
-            {
-                uint sampledLight = 0;
-                sampleLightByPdf(randomState, sampledLight, uv);
-                p = int(sampledLight);
-            }
-
-            if (p < 0 || uint(p) >= totalLightCount) continue;
-
-            float ph = 0.f;
-            float wi = calcw(surf, p, uv, ph);
-            r.update(p, uv, wi, ph, 1.f, randomState);
-        }
-
-        if (r.M > 0 && r.targetPdf > 0.f)
-        {
-            r.W = r.wsum / (float(r.M) * r.targetPdf);
-        }
-        else r.W = 0.f;
+        RTDI_CombineReservoirs(r, localReservoir, 0.5f, localReservoir.targetPdf);
+        RTDI_CombineReservoirs(r, infiniteReservoir, RH_GetNextRandom(randomState), infiniteReservoir.targetPdf);
+        RTDI_CombineReservoirs(r, envReservoir, RH_GetNextRandom(randomState), envReservoir.targetPdf);
+        RTDI_FinalizeResampling(r, 1.0f, 1.0f);
+        r.M = (RTDI_IsValidReservoir(r) || localReservoir.M > 0.f || infiniteReservoir.M > 0.f || envReservoir.M > 0.f) ? 1.f : 0.f;
 
         gReservoir[pixelIndex] = r;
     }
@@ -658,7 +756,7 @@ struct RTDI
 
         uint pixelIndex = pixel.y * gFrameDim.x + pixel.x;
         Reservoir r = gReservoir[pixelIndex];
-        if (!RTDI_IsValidReservoir(r) || r.W <= 0.f) return;
+        if (!RTDI_IsValidReservoir(r)) return;
 
         RTAB_Surface surf;
         if (!loadSurface(pixel, currentSurfaceBufferIndex, true, surf))
@@ -670,7 +768,8 @@ struct RTDI
         PolymorphicLightSample ls;
         if (!samplePolymorphicLight(surf, r.lightID, r.sampleUV, ls))
         {
-            gReservoir[pixelIndex] = Reservoir();
+            discardReservoirSample(r);
+            gReservoir[pixelIndex] = r;
             return;
         }
 
@@ -679,9 +778,7 @@ struct RTDI
         bool visible = rayQuery.traceVisibilityRay(Ray(surf.position, ls.direction, 0.f, tMax));
         if (!visible)
         {
-            r.W = 0.f;
-            r.wsum = 0.f;
-            r.targetPdf = 0.f;
+            discardReservoirSample(r);
         }
 
         gReservoir[pixelIndex] = r;
@@ -693,10 +790,15 @@ struct RTDI
         RH_RandomSamplerState randomState = RH_InitRandomState(pixel, gFrameIndex, 2);
         uint pixelIndex = pixel.y * gFrameDim.x + pixel.x;
         RTAB_Surface surf;
-        loadSurface(pixel, currentSurfaceBufferIndex, true, surf);
+        if (!loadSurface(pixel, currentSurfaceBufferIndex, true, surf))
+        {
+            gReservoir[pixelIndex] = Reservoir();
+            return;
+        }
         Reservoir baseR = gReservoir[pixelIndex];
+
         Reservoir state = Reservoir();
-        RTDI_CombineReservoirs(state, baseR, RH_GetNextRandom(randomState), baseR.targetPdf);
+        RTDI_CombineReservoirs(state, baseR, 0.5f, baseR.targetPdf);
         uint historyLimit = min(RTDI_ReservoirMaxM, maxHistoryLength * baseR.M);
 
         uint2 prevPixel = getPrevPixel(pixel, randomState);
@@ -730,14 +832,17 @@ struct RTDI
         if (findNeighbor) {
             uint prevPixelIndex = prevPixel.y * gFrameDim.x + prevPixel.x;
             Reservoir prevSample = gPrevReservoir[prevPixelIndex];
+            prevSample.M = min(prevSample.M, historyLimit);
+            float currentPdf = 0.f;
             if (RTDI_IsValidReservoir(prevSample))
             {
-                prevSample.M = min(prevSample.M, historyLimit);
                 PolymorphicLightSample ls;
-                samplePolymorphicLight(surf, prevSample.lightID, prevSample.sampleUV, ls);
-                float currentPdf = calcTargetPdf(surf, ls.direction, ls.Li);
-                bool sampleSelected = RTDI_CombineReservoirs(state, prevSample, RH_GetNextRandom(randomState), currentPdf);
+                if (samplePolymorphicLight(surf, prevSample.lightID, prevSample.sampleUV, true, ls))
+                {
+                    currentPdf = calcTargetPdf(surf, ls.direction, ls.Li);
+                }
             }
+            RTDI_CombineReservoirs(state, prevSample, RH_GetNextRandom(randomState), currentPdf);
         }
         RTDI_FinalizeResampling(state, 1.0, state.M);
         //TODO bias correction
@@ -750,24 +855,27 @@ struct RTDI
         if (any(pixel >= gFrameDim)) return;
         uint centerPixelIndex = pixel.y * gFrameDim.x + pixel.x;
         RH_RandomSamplerState rng = RH_InitRandomState(pixel, gFrameIndex, 3);
-        Reservoir state = Reservoir();
         Reservoir centerSample = gPrevReservoir[centerPixelIndex];
-        PolymorphicLight selectedLight = {};
-        if (RTDI_IsValidReservoir(centerSample)) {
-            selectedLight = PolymorphicLight(gLightInfo[uint(centerSample.lightID)]);
-        }
-        RTDI_CombineReservoirs(state, centerSample, RH_GetNextRandom(rng), centerSample.targetPdf);
         RTAB_Surface centerSurface;
-        bool centerSurfaceValid = loadSurface(pixel, currentSurfaceBufferIndex, true, centerSurface);
+        if (!loadSurface(pixel, currentSurfaceBufferIndex, true, centerSurface))
+        {
+            gReservoir[centerPixelIndex] = Reservoir();
+            return;
+        }
+
+        Reservoir state = Reservoir();
+        RTDI_CombineReservoirs(state, centerSample, 0.5f, centerSample.targetPdf);
+
         // TODO When the length of history is less than targetHistoryLength
         // customize the number of samples to select.
         uint numSpatialSamples = min(numSamples, 32);
-        uint cachedResult = 0;
         int i = 0;
         RTAB_Surface neighborSurface;
+        uint startIdx = uint(RH_GetNextRandom(rng) * (float)gNeighborOffsetMask);
         for (i = 0; i < numSpatialSamples; i++) {
+            uint sampleIdx = (startIdx + i) & gNeighborOffsetMask;
             int2 spatialOffset = int2(0, 0);
-            spatialOffset = int2(RH_GetNextRandom2D(rng) * samplingRadius);
+            spatialOffset = int2(float2(gNeighborOffsetBuffer[sampleIdx].xy) * samplingRadius);
             int2 idx = int2(pixel) + spatialOffset;
             bool isValidSurface = loadSurface(idx, currentSurfaceBufferIndex, true, neighborSurface);
             if (!isValidSurface) continue;
@@ -779,11 +887,15 @@ struct RTDI
                 continue;
             uint neighborIndex = idx.y * gFrameDim.x + idx.x;
             Reservoir neighborSample = gPrevReservoir[neighborIndex];
+            float neighborTargetPdf = 0.f;
             if (RTDI_IsValidReservoir(neighborSample)) {
                 PolymorphicLightSample candidateLightSample;
-                samplePolymorphicLight(centerSurface, neighborSample.lightID, neighborSample.sampleUV, candidateLightSample);
-                bool selectNeighbor = RTDI_CombineReservoirs(state, neighborSample, RH_GetNextRandom(rng), calcTargetPdf(centerSurface, candidateLightSample.direction, candidateLightSample.Li));
+                if (samplePolymorphicLight(centerSurface, neighborSample.lightID, neighborSample.sampleUV, true, candidateLightSample))
+                {
+                    neighborTargetPdf = calcTargetPdf(centerSurface, candidateLightSample.direction, candidateLightSample.Li);
+                }
             }
+            RTDI_CombineReservoirs(state, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
         }
         RTDI_FinalizeResampling(state, 1.0f, state.M);
         gReservoir[centerPixelIndex] = state;
@@ -801,7 +913,7 @@ struct RTDI
             RTAB_Surface surf;
             bool validSurface = loadSurface(pixel, currentSurfaceBufferIndex, true, surf);
 
-            if (!validSurface || !RTDI_IsValidReservoir(r) || r.W <= 0.f)
+            if (!validSurface || !RTDI_IsValidReservoir(r))
             {
                 color[pixel] = float4(0, 0, 0, 1);
                 return;

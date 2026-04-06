@@ -28,6 +28,7 @@
 #pragma once
 
 #include "Falcor.h"
+#include "Scene/Camera/Camera.h"
 
 namespace Falcor
 {
@@ -40,7 +41,9 @@ namespace Falcor
     public:
         struct Options
         {
-            uint32_t risSampleCount = 8;
+            uint32_t localRisSampleCount = 8;
+            uint32_t infiniteRisSampleCount = 2;
+            uint32_t envRisSampleCount = 2;
             uint32_t spatialReuseCount = 1;
             uint32_t presampledTileCount = 128;
             uint32_t presampledTileSize = 256;
@@ -81,12 +84,12 @@ namespace Falcor
         };
 
         void recreatePrograms();
+        void fillNeighborOffsetBuffer(uint8_t* buffer) const;
         void prepareBuffers(const ShaderVar& rootVar);
         void updateLights(RenderContext* pRenderContext);
         void updateEnvLight(RenderContext* pRenderContext);
         ref<ComputePass> createComputePass(const char* entryPoint) const;
         ref<ComputePass> createComputePass(const std::string& file, const std::string& entryPoint) const;
-
         ref<Scene> mpScene;
         ref<Device> mpDevice;
 
@@ -95,6 +98,7 @@ namespace Falcor
         ref<ComputePass> mpUpdateLightsPass;
         ref<ComputePass> mpUpdateEnvLightPass;
         ref<ComputePass> mpInitPass;
+        ref<ComputePass> mpClearReservoirPass;
         ref<ComputePass> mpVisibilityPass;
         ref<ComputePass> mpTemporalPass;
         ref<ComputePass> mpSpatialPass;
@@ -107,6 +111,7 @@ namespace Falcor
         ref<Buffer> mpSurfaceDataBuffer;
         ref<Buffer> mpPresampledLightIndexBuffer;
         ref<Buffer> mpPresampledEnvDataBuffer;
+        ref<Buffer> mpNeighborOffsetBuffer;
         ref<Texture> mpLocalLightPdfTex;
         ref<Texture> mpEnvLightLuminanceTex;
         ref<Texture> mpEnvLightPdfTex;
@@ -116,7 +121,8 @@ namespace Falcor
         uint32_t mReservoirElementCount = 0;
         uint32_t mPresampledLightElementCount = 0;
         bool mResetHistory = true;
-
+        uint32_t mNeighborOffsetCount = 8192; //need to be 2^x
+        CameraData mPrevCameraData;
         LightRanges mLights;
         Options mOptions;
     };

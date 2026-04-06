@@ -39,6 +39,9 @@ const char kInputVBuffer[] = "vbuffer";
 const char kInputMVec[] = "mvec";
 const char kOutputColor[] = "color";
 const char kRISSampleCount[] = "risSampleCount";
+const char kLocalRISSampleCount[] = "localRisSampleCount";
+const char kInfiniteRISSampleCount[] = "infiniteRisSampleCount";
+const char kEnvRISSampleCount[] = "envRisSampleCount";
 const char kSpatialReuseCount[] = "spatialReuseCount";
 const char kPresampledTileCount[] = "presampledTileCount";
 const char kPresampledTileSize[] = "presampledTileSize";
@@ -52,7 +55,13 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
     for (const auto& [key, value] : props)
     {
         if (key == kRISSampleCount)
-            mOptions.risSampleCount = value;
+            mOptions.localRisSampleCount = value;
+        else if (key == kLocalRISSampleCount)
+            mOptions.localRisSampleCount = value;
+        else if (key == kInfiniteRISSampleCount)
+            mOptions.infiniteRisSampleCount = value;
+        else if (key == kEnvRISSampleCount)
+            mOptions.envRisSampleCount = value;
         else if (key == kSpatialReuseCount)
             mOptions.spatialReuseCount = value;
         else if (key == kPresampledTileCount)
@@ -69,7 +78,9 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
             logWarning("Unknown property '{}' in ReSTIR_DI properties.", key);
     }
 
-    mOptions.risSampleCount = std::max(mOptions.risSampleCount, 1u);
+    mOptions.localRisSampleCount = std::min(mOptions.localRisSampleCount, 64u);
+    mOptions.infiniteRisSampleCount = std::min(mOptions.infiniteRisSampleCount, 64u);
+    mOptions.envRisSampleCount = std::min(mOptions.envRisSampleCount, 64u);
     mOptions.spatialReuseCount = std::max(mOptions.spatialReuseCount, 1u);
     mOptions.presampledTileCount = std::clamp(mOptions.presampledTileCount, 1u, 1024u);
     mOptions.presampledTileSize = std::clamp(mOptions.presampledTileSize, 1u, 8192u);
@@ -80,7 +91,9 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
 Properties ReSTIR_DI::getProperties() const
 {
     Properties props;
-    props[kRISSampleCount] = mOptions.risSampleCount;
+    props[kLocalRISSampleCount] = mOptions.localRisSampleCount;
+    props[kInfiniteRISSampleCount] = mOptions.infiniteRisSampleCount;
+    props[kEnvRISSampleCount] = mOptions.envRisSampleCount;
     props[kSpatialReuseCount] = mOptions.spatialReuseCount;
     props[kPresampledTileCount] = mOptions.presampledTileCount;
     props[kPresampledTileSize] = mOptions.presampledTileSize;
@@ -129,7 +142,9 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
 void ReSTIR_DI::renderUI(Gui::Widgets& widget)
 {
     bool dirty = false;
-    dirty |= widget.var("RIS M", mOptions.risSampleCount, 1u, 64u);
+    dirty |= widget.var("Local RIS M", mOptions.localRisSampleCount, 0u, 64u);
+    dirty |= widget.var("Infinite RIS M", mOptions.infiniteRisSampleCount, 0u, 64u);
+    dirty |= widget.var("Env RIS M", mOptions.envRisSampleCount, 0u, 64u);
     dirty |= widget.var("Spatial Reuse times", mOptions.spatialReuseCount, 1u, 5u);
     dirty |= widget.var("Presampled Tile Count", mOptions.presampledTileCount, 1u, 1024u);
     dirty |= widget.var("Presampled Tile Size", mOptions.presampledTileSize, 1u, 8192u);

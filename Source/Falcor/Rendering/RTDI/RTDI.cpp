@@ -40,6 +40,7 @@ namespace Falcor
         const char kPresampleEntry[] = "ReSTIR_Presample";
         const char kPresampleEnvEntry[] = "ReSTIR_PresampleEnv";
         const char kInitEntry[] = "ReSTIR_Init";
+        const char kClearReservoirEntry[] = "ReSTIR_ClearReservoir";
         const char kVisibilityEntry[] = "ReSTIR_Visibility";
         const char kTemporalEntry[] = "ReSTIR_TemporalReuse";
         const char kSpatialEntry[] = "ReSTIR_SpatialReuse";
@@ -70,7 +71,9 @@ namespace Falcor
 
     void RTDI::setOptions(const Options& options)
     {
-        mOptions.risSampleCount = std::max(options.risSampleCount, 1u);
+        mOptions.localRisSampleCount = std::min(options.localRisSampleCount, 64u);
+        mOptions.infiniteRisSampleCount = std::min(options.infiniteRisSampleCount, 64u);
+        mOptions.envRisSampleCount = std::min(options.envRisSampleCount, 64u);
         mOptions.spatialReuseCount = std::max(options.spatialReuseCount, 1u);
         mOptions.presampledTileCount = std::clamp(options.presampledTileCount, 1u, 1024u);
         mOptions.presampledTileSize = std::clamp(options.presampledTileSize, 1u, 8192u);
@@ -87,6 +90,7 @@ namespace Falcor
         mpUpdateLightsPass = nullptr;
         mpUpdateEnvLightPass = nullptr;
         mpInitPass = nullptr;
+        mpClearReservoirPass = nullptr;
         mpVisibilityPass = nullptr;
         mpTemporalPass = nullptr;
         mpSpatialPass = nullptr;
@@ -132,6 +136,19 @@ namespace Falcor
             mpPresampledEnvDataBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gPresampledEnvData"], presampledLightCount);
             mpPresampledLightIndexBuffer->setName("RTDI::PresampledLightIndex");
             mpPresampledEnvDataBuffer->setName("RTDI::PresampledEnvData");
+        }
+
+        if(!mpNeighborOffsetBuffer){
+            uint32_t elementCount = 2 * mNeighborOffsetCount;
+            std::vector<uint8_t> offsets((size_t)elementCount);
+            fillNeighborOffsetBuffer(offsets.data());
+            mpNeighborOffsetBuffer = mpDevice->createTypedBuffer(
+                ResourceFormat::RG8Snorm,
+                mNeighborOffsetCount,
+                ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess,
+                MemoryType::DeviceLocal,
+                offsets.data()
+            );
         }
     }
 
@@ -280,7 +297,26 @@ namespace Falcor
         mpUpdateEnvLightPass->execute(pRenderContext, width, height);
         mpEnvLightPdfTex->generateMips(pRenderContext);
     }
+    void RTDI::fillNeighborOffsetBuffer(uint8_t* buffer) const{
+        int R = 250;
+        const float phi2 = 1.0f / 1.3247179572447f;
+        uint32_t num = 0;
+        float u = 0.5f;
+        float v = 0.5f;
+        while (num < mNeighborOffsetCount * 2) {
+            u += phi2;
+            v += phi2 * phi2;
+            if (u >= 1.0f) u -= 1.0f;
+            if (v >= 1.0f) v -= 1.0f;
 
+            float rSq = (u - 0.5f) * (u - 0.5f) + (v - 0.5f) * (v - 0.5f);
+            if (rSq > 0.25f)
+                continue;
+
+            buffer[num++] = int8_t((u - 0.5f) * R);
+            buffer[num++] = int8_t((v - 0.5f) * R);
+        }
+    }
     void RTDI::execute(
         RenderContext* pRenderContext,
         const ref<Texture>& pVBuffer,
@@ -292,6 +328,7 @@ namespace Falcor
             return;
 
         mFrameDim = uint2(pVBuffer->getWidth(), pVBuffer->getHeight());
+        if (mFrameIndex == 0) mPrevCameraData = mpScene->getCamera()->getData();
 
         const auto& pLights = mpScene->getLightCollection(pRenderContext);
         if (pLights) pLights->update(pRenderContext);
@@ -307,6 +344,7 @@ namespace Falcor
         if (!mpPresamplePass) mpPresamplePass = createComputePass(kPresampleEntry);
         if (!mpPresampleEnvPass) mpPresampleEnvPass = createComputePass(kPresampleEnvEntry);
         if (!mpInitPass) mpInitPass = createComputePass(kInitEntry);
+        if (!mpClearReservoirPass) mpClearReservoirPass = createComputePass(kClearReservoirEntry);
         if (!mpVisibilityPass) mpVisibilityPass = createComputePass(kVisibilityEntry);
         if (!mpTemporalPass) mpTemporalPass = createComputePass(kTemporalEntry);
         if (!mpSpatialPass) mpSpatialPass = createComputePass(kSpatialEntry);
@@ -316,13 +354,6 @@ namespace Falcor
         updateEnvLight(pRenderContext);
 
         prepareBuffers(mpInitPass->getRootVar());
-
-        if (mResetHistory || mFrameIndex == 0)
-        {
-            pRenderContext->clearUAV(mpPrevReservoirBuffer->getUAV().get(), uint4(0));
-            mResetHistory = false;
-        }
-
 
         const uint32_t frameSeed = (mFrameIndex * 1664525u + 1013904223u) ^ 0xA511E9B3u;
 
@@ -343,10 +374,12 @@ namespace Falcor
             var["localLightPdfTexture"] = mpLocalLightPdfTex;
             var["envLightLuminanceTexture"] = mpEnvLightLuminanceTex;
             var["envLightPdfTexture"] = mpEnvLightPdfTex;
-
+            var["gNeighborOffsetBuffer"] = mpNeighborOffsetBuffer;
             uint32_t currentSurfaceBufferIndex = mFrameIndex & 1u;
             auto cb = var;
-            cb["gRIS_M"] = mOptions.risSampleCount;
+            cb["gLocalRIS_M"] = mOptions.localRisSampleCount;
+            cb["gInfiniteRIS_M"] = mOptions.infiniteRisSampleCount;
+            cb["gEnvRIS_M"] = mOptions.envRisSampleCount;
             cb["gPresampledTileCount"] = mOptions.presampledTileCount;
             cb["gPresampledTileSize"] = mOptions.presampledTileSize;
             cb["gFrameDim"] = mFrameDim;
@@ -363,7 +396,19 @@ namespace Falcor
 
             cb["currentSurfaceBufferIndex"] = currentSurfaceBufferIndex;
             cb["prevSurfaceBufferIndex"] = 1u - currentSurfaceBufferIndex;
+            cb["gNeighborOffsetMask"] = mNeighborOffsetCount - 1;
+            cb["prevCameraU"] = mPrevCameraData.cameraU;
+            cb["prevCameraV"] = mPrevCameraData.cameraV;
+            cb["prevCameraW"] = mPrevCameraData.cameraW;
+            cb["prevCameraJitter"] = float2(mPrevCameraData.jitterX, mPrevCameraData.jitterY);
         };
+
+        if (mResetHistory || mFrameIndex == 0)
+        {
+            bindCommonVars(mpClearReservoirPass, 0x0BADF00Du, mpPrevReservoirBuffer, mpPrevReservoirBuffer);
+            mpClearReservoirPass->execute(pRenderContext, mReservoirElementCount, 1);
+            mResetHistory = false;
+        }
 
         bindCommonVars(mpPresamplePass, 0x13579BDFu);
         const uint32_t presampleCount = std::max(mOptions.presampledTileCount * mOptions.presampledTileSize, 1u);
@@ -393,6 +438,7 @@ namespace Falcor
         mpShadePass->getRootVar()["gRTDI"]["color"] = pColor;
         mpShadePass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
 
+        mPrevCameraData = mpScene->getCamera()->getData();
         mFrameIndex++;
     }
 }

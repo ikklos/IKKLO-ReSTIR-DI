@@ -222,7 +222,9 @@ struct EmissiveLight : IPolymorphicLight
         // Note: Guard against div-by-zero here by clamping.
         float denom = max(FLT_MIN, cosTheta * area);
         ls.pdf = distSqr / denom;
-        // Keep radiance in Li. PDF is returned separately in ls.pdf.
+
+        // Pre-divide incident radiance by the PDF.
+        ls.Li *= denom / distSqr;
 
         return ls;
     }
@@ -297,7 +299,7 @@ struct AnalyticLight : IPolymorphicLight
         return ls;
     }
 #endif // RTXDI_POLYMORPHIC_LIGHT_SAMPLING
-};
+}
 
 /** Represents the environment light.
 */
@@ -335,15 +337,14 @@ struct EnvLight : IPolymorphicLight
         ls.position = shadingPosition + ls.direction * ls.distance;
         if (scalarLi)
         {
-            float L = gRTDI.envLightLuminanceTexture.SampleLevel(gScene.envMap.envSampler, uv, 0);
-            ls.Li = L.xxx;
+            ls.Li = gRTDI.envLightLuminanceTexture.SampleLevel(gScene.envMap.envSampler, uv, 0).rgb;
         }
         else
         {
             ls.Li = gScene.envMap.eval(uv);
         }
         ls.pdf = 1.f / max(FLT_MIN, 2.f * M_PI * M_PI * relativeSolidAngle);
-        // Keep radiance in Li. PDF is returned separately in ls.pdf.
+        ls.Li /= ls.pdf;
 
         return ls;
     }
@@ -403,11 +404,3 @@ struct PolymorphicLight : IPolymorphicLight
     }
 #endif // RTXDI_POLYMORPHIC_LIGHT_SAMPLING
 };
-
-
-
-
-
-
-
-
