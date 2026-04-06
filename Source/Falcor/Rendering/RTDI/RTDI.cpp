@@ -74,9 +74,15 @@ namespace Falcor
         mOptions.localRisSampleCount = std::min(options.localRisSampleCount, 64u);
         mOptions.infiniteRisSampleCount = std::min(options.infiniteRisSampleCount, 64u);
         mOptions.envRisSampleCount = std::min(options.envRisSampleCount, 64u);
+        mOptions.brdfRisSampleCount = std::min(options.brdfRisSampleCount, 64u);
+        mOptions.enableTemporalReuse = options.enableTemporalReuse;
+        mOptions.enableSpatialReuse = options.enableSpatialReuse;
         mOptions.spatialReuseCount = std::max(options.spatialReuseCount, 1u);
+        mOptions.spatialReuseSampleCount = std::clamp(options.spatialReuseSampleCount, 1u, 32u);
         mOptions.presampledTileCount = std::clamp(options.presampledTileCount, 1u, 1024u);
         mOptions.presampledTileSize = std::clamp(options.presampledTileSize, 1u, 8192u);
+        mOptions.temporalSamplingRadius = std::clamp(options.temporalSamplingRadius, 0.f, 64.f);
+        mOptions.spatialSamplingRadius = std::clamp(options.spatialSamplingRadius, 0.f, 64.f);
         mOptions.normalThreshold = std::clamp(options.normalThreshold, 0.f, 1.f);
         mOptions.depthThreshold = std::clamp(options.depthThreshold, 0.f, 1.f);
         mOptions.useEmissiveTextures = options.useEmissiveTextures;
@@ -380,8 +386,12 @@ namespace Falcor
             cb["gLocalRIS_M"] = mOptions.localRisSampleCount;
             cb["gInfiniteRIS_M"] = mOptions.infiniteRisSampleCount;
             cb["gEnvRIS_M"] = mOptions.envRisSampleCount;
+            cb["gBrdfRIS_M"] = mOptions.brdfRisSampleCount;
+            cb["gSpatialReuseSampleCount"] = mOptions.spatialReuseSampleCount;
             cb["gPresampledTileCount"] = mOptions.presampledTileCount;
             cb["gPresampledTileSize"] = mOptions.presampledTileSize;
+            cb["gTemporalSamplingRadius"] = mOptions.temporalSamplingRadius;
+            cb["gSpatialSamplingRadius"] = mOptions.spatialSamplingRadius;
             cb["gFrameDim"] = mFrameDim;
             cb["gFrameIndex"] = mFrameIndex;
             cb["gRandomSeed"] = frameSeed ^ passSalt;
@@ -423,20 +433,36 @@ namespace Falcor
         bindCommonVars(mpVisibilityPass, 0x31415926u);
         mpVisibilityPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
 
-        bindCommonVars(mpTemporalPass, 0x27182818u);
-        mpTemporalPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+        ref<Buffer> pFinalReservoir = mpReservoirBuffer;
 
-        std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
-        for (uint32_t i = 0; i < mOptions.spatialReuseCount; i++)
+        if (mOptions.enableTemporalReuse)
         {
-            bindCommonVars(mpSpatialPass, 0x5A5A5A5Au ^ i);
-            mpSpatialPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
-            std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
+            bindCommonVars(mpTemporalPass, 0x27182818u);
+            mpTemporalPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+            pFinalReservoir = mpReservoirBuffer;
         }
 
-        bindCommonVars(mpShadePass, 0xC001D00Du, mpPrevReservoirBuffer, mpReservoirBuffer);
+        if (mOptions.enableSpatialReuse)
+        {
+            // Prepare ping-pong for spatial reuse: input from mpPrevReservoirBuffer, output to mpReservoirBuffer.
+            if (pFinalReservoir == mpReservoirBuffer) std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
+
+            for (uint32_t i = 0; i < mOptions.spatialReuseCount; i++)
+            {
+                bindCommonVars(mpSpatialPass, 0x5A5A5A5Au ^ i);
+                mpSpatialPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+                std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
+            }
+
+            pFinalReservoir = mpPrevReservoirBuffer;
+        }
+
+        bindCommonVars(mpShadePass, 0xC001D00Du, pFinalReservoir, mpReservoirBuffer);
         mpShadePass->getRootVar()["gRTDI"]["color"] = pColor;
         mpShadePass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+
+        // Keep last frame final reservoirs in mpPrevReservoirBuffer for temporal reuse next frame.
+        if (pFinalReservoir == mpReservoirBuffer) std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);
 
         mPrevCameraData = mpScene->getCamera()->getData();
         mFrameIndex++;

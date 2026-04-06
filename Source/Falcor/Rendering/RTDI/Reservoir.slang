@@ -4,7 +4,6 @@ struct Reservoir
     int lightID = -1;
     float2 sampleUV = float2(0, 0);
 
-    float W = 0.0;
     float wsum = 0.0;
     float targetPdf = 0.0;
     float M = 0;

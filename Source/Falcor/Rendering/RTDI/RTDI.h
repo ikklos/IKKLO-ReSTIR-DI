@@ -41,12 +41,18 @@ namespace Falcor
     public:
         struct Options
         {
-            uint32_t localRisSampleCount = 8;
-            uint32_t infiniteRisSampleCount = 2;
-            uint32_t envRisSampleCount = 2;
+            uint32_t localRisSampleCount = 24;
+            uint32_t infiniteRisSampleCount = 8;
+            uint32_t envRisSampleCount = 8;
+            uint32_t brdfRisSampleCount = 1;
+            bool enableTemporalReuse = true;
+            bool enableSpatialReuse = true;
             uint32_t spatialReuseCount = 1;
+            uint32_t spatialReuseSampleCount = 9;
             uint32_t presampledTileCount = 128;
             uint32_t presampledTileSize = 256;
+            float temporalSamplingRadius = 4.f;
+            float spatialSamplingRadius = 30.f;
             float normalThreshold = 0.5f;
             float depthThreshold = 0.1f;
             uint useEmissiveTextures = 0u;

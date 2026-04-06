@@ -10,7 +10,7 @@ bool RTDI_CombineReservoirs(
         newR,
         random,
         targetP,
-        newR.M * newR.W,
+        newR.M * newR.wsum,
         newR.M
     );
 }
@@ -33,7 +33,7 @@ bool RTDI_CombineReservoirsInternal(
     }
     return false;
 }
-/** calc W
+/** Finalize reservoir inverse-pdf weight in wsum.
 */
 void RTDI_FinalizeResampling(
     inout Reservoir reservoir,
@@ -42,7 +42,7 @@ void RTDI_FinalizeResampling(
 ) {
     float denominator = reservoir.targetPdf * normalizationDenominator;
 
-    reservoir.W = (denominator == 0.0) ? 0.0 : (reservoir.wsum * normalizationNumerator) / denominator;
+    reservoir.wsum = (denominator == 0.0) ? 0.0 : (reservoir.wsum * normalizationNumerator) / denominator;
 }
 /**
  */

@@ -35,13 +35,13 @@ void ReSTIR_Visibility(uint3 dispatchThreadId : SV_DispatchThreadID)
 [numthreads(16, 16, 1)]
 void ReSTIR_TemporalReuse(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    gRTDI.temporalReuse(dispatchThreadId.xy, 16);
+    gRTDI.temporalReuse(dispatchThreadId.xy, 20, gRTDI.gTemporalSamplingRadius);
 }
 
 [numthreads(16, 16, 1)]
 void ReSTIR_SpatialReuse(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    gRTDI.spatialReuse(dispatchThreadId.xy, 9, 4.f);
+    gRTDI.spatialReuse(dispatchThreadId.xy, gRTDI.gSpatialReuseSampleCount, gRTDI.gSpatialSamplingRadius);
 }
 
 [numthreads(16, 16, 1)]
