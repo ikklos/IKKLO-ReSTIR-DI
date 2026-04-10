@@ -85,6 +85,7 @@ namespace Falcor
         mOptions.spatialSamplingRadius = std::clamp(options.spatialSamplingRadius, 0.f, 64.f);
         mOptions.normalThreshold = std::clamp(options.normalThreshold, 0.f, 1.f);
         mOptions.depthThreshold = std::clamp(options.depthThreshold, 0.f, 1.f);
+        mOptions.rayEpsilon = std::max(options.rayEpsilon, 1.0e-6f);
         mOptions.useEmissiveTextures = options.useEmissiveTextures;
         mResetHistory = true;
     }
@@ -397,6 +398,7 @@ namespace Falcor
             cb["gRandomSeed"] = frameSeed ^ passSalt;
             cb["normalThreshold"] = mOptions.normalThreshold;
             cb["depthThreshold"] = mOptions.depthThreshold;
+            cb["rayEpsilon"] = mOptions.rayEpsilon;
             cb["useEmissiveTextures"] = mOptions.useEmissiveTextures;
 
             cb["firstLocalAnalyticLight"] = mLights.getFirstLocalAnalyticLight();

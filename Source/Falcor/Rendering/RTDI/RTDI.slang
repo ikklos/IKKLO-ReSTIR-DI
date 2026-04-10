@@ -40,6 +40,7 @@ struct RTDI
     uint gRandomSeed;
     float normalThreshold;
     float depthThreshold;
+    float rayEpsilon;
 
     uint useEmissiveTextures;
     uint firstLocalAnalyticLight;
@@ -942,9 +943,9 @@ struct RTDI
             return;
         }
 
-        float tMax = (ls.distance >= FLT_MAX * 0.5f) ? FLT_MAX : max(ls.distance - 2e-3f, 0.f);
+        float tMax = (ls.distance >= FLT_MAX * 0.5f) ? FLT_MAX : max(ls.distance - rayEpsilon, 0.f);
         SceneRayQuery<0> rayQuery;
-        bool visible = rayQuery.traceVisibilityRay(Ray(surf.position, ls.direction, 0.f, tMax),RAY_FLAG_CULL_NON_OPAQUE);
+        bool visible = rayQuery.traceVisibilityRay(Ray(surf.position, ls.direction, rayEpsilon, tMax), RAY_FLAG_CULL_NON_OPAQUE);
         if (!visible)
         {
             discardReservoirSample(r);
@@ -1026,11 +1027,6 @@ struct RTDI
         uint centerPixelIndex = pixel.y * gFrameDim.x + pixel.x;
         RH_RandomSamplerState rng = RH_InitRandomState(pixel, gFrameIndex, 3);
         Reservoir centerSample = gPrevReservoir[centerPixelIndex];
-        if (!RTDI_IsValidReservoir(centerSample))
-        {
-            gReservoir[centerPixelIndex] = Reservoir();
-            return;
-        }
         RTAB_Surface centerSurface;
         if (!loadSurface(pixel, currentSurfaceBufferIndex, true, centerSurface))
         {
@@ -1094,15 +1090,16 @@ struct RTDI
             float3 specular = {};
             if (!validSurface)
             {
-                color[pixelIndex] = float4(0, 0, 0, 1);
+                color[pixel] = float4(0,0,0,1);
                 return;
             }
             PolymorphicLightSample ls;
             if (RTDI_IsValidReservoir(r) && samplePolymorphicLight(surf, r.lightID, r.sampleUV, ls)) {
-                float tMax = (ls.distance >= FLT_MAX * 0.5f) ? FLT_MAX : max(ls.distance - 2e-3f, 0.f);
+                float tMax = (ls.distance >= FLT_MAX * 0.5f) ? FLT_MAX : max(ls.distance - rayEpsilon, 0.f);
                 SceneRayQuery<1> rayQuery;
-                bool visible = rayQuery.traceVisibilityRay(Ray(surf.position, ls.direction, 0.f, tMax));
-                if (visible) {
+                const Ray ray = Ray(sd.computeRayOrigin(), ls.direction, 0.f, tMax);
+                if (rayQuery.traceVisibilityRay(ray))
+                {
                     TinyUniformSampleGenerator sg = TinyUniformSampleGenerator(pixel, gFrameIndex);
                     sd.mtl.setActiveLobes((uint)LobeType::DiffuseReflection);
                     diffuse = mi.eval(sd, ls.direction, sg) * ls.Li;

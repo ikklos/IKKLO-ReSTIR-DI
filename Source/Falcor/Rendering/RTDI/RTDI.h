@@ -55,6 +55,7 @@ namespace Falcor
             float spatialSamplingRadius = 30.f;
             float normalThreshold = 0.5f;
             float depthThreshold = 0.1f;
+            float rayEpsilon = 1.0e-3f;
             uint useEmissiveTextures = 0u;
         };
 

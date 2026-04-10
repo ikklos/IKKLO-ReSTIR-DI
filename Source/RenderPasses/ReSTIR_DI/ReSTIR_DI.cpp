@@ -53,6 +53,7 @@ const char kTemporalSamplingRadius[] = "temporalSamplingRadius";
 const char kSpatialSamplingRadius[] = "spatialSamplingRadius";
 const char kNormalThreshold[] = "normalThreshold";
 const char kDepthThreshold[] = "depthThreshold";
+const char kRayEpsilon[] = "rayEpsilon";
 const char kUseEmissiveTextures[] = "useEmissiveTextures";
 }
 
@@ -90,6 +91,8 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
             mOptions.normalThreshold = value;
         else if (key == kDepthThreshold)
             mOptions.depthThreshold = value;
+        else if (key == kRayEpsilon)
+            mOptions.rayEpsilon = value;
         else if (key == kUseEmissiveTextures)
             mOptions.useEmissiveTextures = value;
         else
@@ -108,6 +111,7 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
     mOptions.spatialSamplingRadius = std::clamp(mOptions.spatialSamplingRadius, 0.f, 64.f);
     mOptions.normalThreshold = std::clamp(mOptions.normalThreshold, 0.f, 1.f);
     mOptions.depthThreshold = std::clamp(mOptions.depthThreshold, 0.f, 1.f);
+    mOptions.rayEpsilon = std::max(mOptions.rayEpsilon, 1.0e-6f);
 }
 
 Properties ReSTIR_DI::getProperties() const
@@ -127,6 +131,7 @@ Properties ReSTIR_DI::getProperties() const
     props[kSpatialSamplingRadius] = mOptions.spatialSamplingRadius;
     props[kNormalThreshold] = mOptions.normalThreshold;
     props[kDepthThreshold] = mOptions.depthThreshold;
+    props[kRayEpsilon] = mOptions.rayEpsilon;
     props[kUseEmissiveTextures] = mOptions.useEmissiveTextures;
     return props;
 }
@@ -184,6 +189,7 @@ void ReSTIR_DI::renderUI(Gui::Widgets& widget)
     dirty |= widget.var("Spatial Radius", mOptions.spatialSamplingRadius, 0.f, 64.f, 0.1f);
     dirty |= widget.var("Normal Threshold", mOptions.normalThreshold, 0.f, 1.f, 0.001f);
     dirty |= widget.var("Depth Threshold", mOptions.depthThreshold, 0.f, 1.f, 0.001f);
+    dirty |= widget.var("Ray Epsilon", mOptions.rayEpsilon, 1.0e-6f, 1.0e-2f, 1.0e-6f);
     dirty |= widget.checkbox("Use Emissive Textures", mOptions.useEmissiveTextures);
 
     if (dirty && mpRTDI)
