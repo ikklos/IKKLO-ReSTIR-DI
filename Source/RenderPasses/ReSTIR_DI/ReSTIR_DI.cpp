@@ -26,6 +26,8 @@
  # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  **************************************************************************/
 #include "ReSTIR_DI.h"
+#include "RenderGraph/RenderPassHelpers.h"
+#include "RenderGraph/RenderPassStandardFlags.h"
 #include <algorithm>
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
@@ -164,6 +166,14 @@ void ReSTIR_DI::execute(RenderContext* pRenderContext, const RenderData& renderD
 {
     if (!mpScene || !mpRTDI)
         return;
+
+    auto& dict = renderData.getDictionary();
+    bool gbufferAdjustShadingNormals = dict.getValue(Falcor::kRenderPassGBufferAdjustShadingNormals, false);
+    if (gbufferAdjustShadingNormals != mGBufferAdjustShadingNormals)
+    {
+        mGBufferAdjustShadingNormals = gbufferAdjustShadingNormals;
+        mpRTDI->setGBufferAdjustShadingNormals(mGBufferAdjustShadingNormals);
+    }
 
     const auto pVBuffer = renderData.getTexture(kInputVBuffer);
     const auto pMotionVectors = renderData.getTexture(kInputMVec);

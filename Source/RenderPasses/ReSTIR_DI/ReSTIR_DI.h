@@ -57,4 +57,5 @@ private:
     ref<Scene> mpScene;
     std::unique_ptr<RTDI> mpRTDI;
     RTDI::Options mOptions;
+    bool mGBufferAdjustShadingNormals = false;
 };

@@ -44,6 +44,7 @@ namespace Falcor
         const char kVisibilityEntry[] = "ReSTIR_Visibility";
         const char kTemporalEntry[] = "ReSTIR_TemporalReuse";
         const char kSpatialEntry[] = "ReSTIR_SpatialReuse";
+        const char kSpatiotemporalEntry[] = "ReSTIR_SpatiotemporalReuse";
         const char kShadeEntry[] = "ReSTIR_ShadeColor";
 
         /*
@@ -90,6 +91,13 @@ namespace Falcor
         mResetHistory = true;
     }
 
+    void RTDI::setGBufferAdjustShadingNormals(bool enabled)
+    {
+        if (mGBufferAdjustShadingNormals == enabled) return;
+        mGBufferAdjustShadingNormals = enabled;
+        recreatePrograms();
+    }
+
     void RTDI::recreatePrograms()
     {
         mpPresamplePass = nullptr;
@@ -101,6 +109,7 @@ namespace Falcor
         mpVisibilityPass = nullptr;
         mpTemporalPass = nullptr;
         mpSpatialPass = nullptr;
+        mpSpatiotemporalPass = nullptr;
         mpShadePass = nullptr;
     }
 
@@ -117,6 +126,7 @@ namespace Falcor
         desc.addTypeConformances(mpScene->getTypeConformances());
 
         auto defines = mpScene->getSceneDefines();
+        defines.add("GBUFFER_ADJUST_SHADING_NORMALS", mGBufferAdjustShadingNormals ? "1" : "0");
         return ComputePass::create(mpDevice, desc, defines, true);
     }
 
@@ -355,6 +365,7 @@ namespace Falcor
         if (!mpVisibilityPass) mpVisibilityPass = createComputePass(kVisibilityEntry);
         if (!mpTemporalPass) mpTemporalPass = createComputePass(kTemporalEntry);
         if (!mpSpatialPass) mpSpatialPass = createComputePass(kSpatialEntry);
+        if (!mpSpatiotemporalPass) mpSpatiotemporalPass = createComputePass(kSpatiotemporalEntry);
         if (!mpShadePass) mpShadePass = createComputePass(kShadeEntry);
 
         updateLights(pRenderContext);
@@ -366,6 +377,7 @@ namespace Falcor
 
         auto bindCommonVars = [&](const ref<ComputePass>& pass, uint32_t passSalt, const ref<Buffer>& pReservoir = nullptr, const ref<Buffer>& pPrevReservoir = nullptr)
         {
+            pass->addDefine("GBUFFER_ADJUST_SHADING_NORMALS", mGBufferAdjustShadingNormals ? "1" : "0");
             auto rootVar = pass->getRootVar();
             auto var = rootVar["gRTDI"];
             mpScene->bindShaderData(rootVar["gScene"]);
@@ -437,14 +449,20 @@ namespace Falcor
 
         ref<Buffer> pFinalReservoir = mpReservoirBuffer;
 
-        if (mOptions.enableTemporalReuse)
+        if (mOptions.enableTemporalReuse && mOptions.enableSpatialReuse)
+        {
+            bindCommonVars(mpSpatiotemporalPass, 0x6C8E9CF5u);
+            mpSpatiotemporalPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
+            pFinalReservoir = mpReservoirBuffer;
+        }
+        else if (mOptions.enableTemporalReuse)
         {
             bindCommonVars(mpTemporalPass, 0x27182818u);
             mpTemporalPass->execute(pRenderContext, mFrameDim.x, mFrameDim.y);
             pFinalReservoir = mpReservoirBuffer;
         }
 
-        if (mOptions.enableSpatialReuse)
+        if (mOptions.enableSpatialReuse && !mOptions.enableTemporalReuse)
         {
             // Prepare ping-pong for spatial reuse: input from mpPrevReservoirBuffer, output to mpReservoirBuffer.
             if (pFinalReservoir == mpReservoirBuffer) std::swap(mpReservoirBuffer, mpPrevReservoirBuffer);

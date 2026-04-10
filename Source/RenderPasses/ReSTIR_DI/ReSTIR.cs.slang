@@ -45,6 +45,17 @@ void ReSTIR_SpatialReuse(uint3 dispatchThreadId : SV_DispatchThreadID)
 }
 
 [numthreads(16, 16, 1)]
+void ReSTIR_SpatiotemporalReuse(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    gRTDI.spatiotemporalReuse(
+        dispatchThreadId.xy,
+        20,
+        gRTDI.gSpatialReuseSampleCount,
+        gRTDI.gTemporalSamplingRadius,
+        gRTDI.gSpatialSamplingRadius);
+}
+
+[numthreads(16, 16, 1)]
 void ReSTIR_ShadeColor(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     gRTDI.shadeColor(dispatchThreadId.xy);

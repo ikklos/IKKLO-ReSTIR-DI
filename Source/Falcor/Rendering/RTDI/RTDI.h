@@ -70,6 +70,7 @@ namespace Falcor
             const ref<Texture>& pMotionVectors,
             const ref<Texture>& pColor
         );
+        void setGBufferAdjustShadingNormals(bool enabled);
 
     private:
         struct LightRanges
@@ -109,6 +110,7 @@ namespace Falcor
         ref<ComputePass> mpVisibilityPass;
         ref<ComputePass> mpTemporalPass;
         ref<ComputePass> mpSpatialPass;
+        ref<ComputePass> mpSpatiotemporalPass;
         ref<ComputePass> mpShadePass;
 
         ref<Buffer> mpReservoirBuffer;
@@ -129,6 +131,7 @@ namespace Falcor
         uint32_t mPresampledLightElementCount = 0;
         bool mResetHistory = true;
         uint32_t mNeighborOffsetCount = 8192; //need to be 2^x
+        bool mGBufferAdjustShadingNormals = false;
         CameraData mPrevCameraData;
         LightRanges mLights;
         Options mOptions;
