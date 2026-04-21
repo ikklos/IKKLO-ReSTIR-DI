@@ -488,14 +488,3 @@ namespace Falcor
         mFrameIndex++;
     }
 }
-
-
-
-
-
-
-
-
-
-
-

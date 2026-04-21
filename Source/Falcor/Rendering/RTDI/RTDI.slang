@@ -422,10 +422,8 @@ struct RTDI
         if (any(texel >= dim)) return 0.f;
         float texelValue = max(localLightPdfTexture.Load(int3(texel, 0)).x, 0.f);
 
-        int lastMip = max(0, int(floor(log2(max(dim.x, dim.y)))) - 1);
-        float avg0 = max(localLightPdfTexture.Load(int3(0, 0, lastMip)).x, 0.f);
-        float avg1 = max(localLightPdfTexture.Load(int3(1, 0, lastMip)).x, 0.f);
-        float averageValue = 0.5f * (avg0 + avg1);
+        int topMip = int(mipCount) - 1;
+        float averageValue = max(localLightPdfTexture.Load(int3(0, 0, topMip)).x, 0.f);
         float sum = averageValue * float(dim.x * dim.y);
         return (sum > 0.f) ? (texelValue / sum) : 0.f;
     }
