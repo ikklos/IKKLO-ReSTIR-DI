@@ -1,9 +1,9 @@
 import Reservoir;
-bool RTDI_CombineReservoirs(
+bool3 RTDI_CombineReservoirs(
     inout Reservoir targetR,
     Reservoir newR,
     float random,
-    float targetP
+    float3 targetP
 ) {
     return RTDI_CombineReservoirsInternal(
         targetR,
@@ -14,24 +14,37 @@ bool RTDI_CombineReservoirs(
         newR.M
     );
 }
-bool RTDI_CombineReservoirsInternal(
+bool3 RTDI_CombineReservoirsInternal(
     inout Reservoir targetR,
     Reservoir newR,
     float random,
-    float targetP,
-    float sampleNormalization,
+    float3 targetP,
+    float3 sampleNormalization,
     float sampleM
 ) {
-    float risWeight = targetP * sampleNormalization;
+    bool3 res = bool3(false);
+    float3 risWeight = targetP * sampleNormalization;
     targetR.M += sampleM;
     targetR.wsum += risWeight;
-    if (random * targetR.wsum < risWeight) {
-        targetR.lightID = newR.lightID;
-        targetR.sampleUV = newR.sampleUV;
-        targetR.targetPdf = targetP;
-        return true;
+    if (random * targetR.wsum.x < risWeight.x) {
+        targetR.lightID.x = newR.lightID.x;
+        targetR.uv[0] = newR.uv[0];
+        targetR.targetPdf.x = targetP.x;
+        res.x = true;
     }
-    return false;
+    if (random * targetR.wsum.y < risWeight.y) {
+        targetR.lightID.y = newR.lightID.y;
+        targetR.uv[1] = newR.uv[1];
+        targetR.targetPdf.y = targetP.y;
+        res.y = true;
+    }
+    if (random * targetR.wsum.z < risWeight.z) {
+        targetR.lightID.z = newR.lightID.z;
+        targetR.uv[2] = newR.uv[2];
+        targetR.targetPdf.z = targetP.z;
+        res.z = true;
+    }
+    return res;
 }
 /** Finalize reservoir inverse-pdf weight in wsum.
 */
@@ -40,12 +53,12 @@ void RTDI_FinalizeResampling(
     float normalizationNumerator,
     float normalizationDenominator
 ) {
-    float denominator = reservoir.targetPdf * normalizationDenominator;
+    float3 denominator = reservoir.targetPdf * normalizationDenominator;
 
-    reservoir.wsum = (denominator == 0.0) ? 0.0 : (reservoir.wsum * normalizationNumerator) / denominator;
+    reservoir.wsum = select(denominator == 0.0f, 0.0f, (reservoir.wsum * normalizationNumerator) / denominator);
 }
 /**
  */
-bool RTDI_IsValidReservoir(const Reservoir reservoir) {
-    return reservoir.lightID >= 0;
+bool RTDI_IsValidReservoir(const Reservoir reservoir, uint channel) {
+    return reservoir.lightID[channel] >= 0;
 }
