@@ -40,7 +40,6 @@ namespace Falcor
         const char kPresampleEntry[] = "ReSTIR_Presample";
         const char kPresampleEnvEntry[] = "ReSTIR_PresampleEnv";
         const char kInitEntry[] = "ReSTIR_Init";
-        const char kClearReservoirEntry[] = "ReSTIR_ClearReservoir";
         const char kVisibilityEntry[] = "ReSTIR_Visibility";
         const char kTemporalEntry[] = "ReSTIR_TemporalReuse";
         const char kSpatialEntry[] = "ReSTIR_SpatialReuse";
@@ -105,7 +104,6 @@ namespace Falcor
         mpUpdateLightsPass = nullptr;
         mpUpdateEnvLightPass = nullptr;
         mpInitPass = nullptr;
-        mpClearReservoirPass = nullptr;
         mpVisibilityPass = nullptr;
         mpTemporalPass = nullptr;
         mpSpatialPass = nullptr;
@@ -361,7 +359,6 @@ namespace Falcor
         if (!mpPresamplePass) mpPresamplePass = createComputePass(kPresampleEntry);
         if (!mpPresampleEnvPass) mpPresampleEnvPass = createComputePass(kPresampleEnvEntry);
         if (!mpInitPass) mpInitPass = createComputePass(kInitEntry);
-        if (!mpClearReservoirPass) mpClearReservoirPass = createComputePass(kClearReservoirEntry);
         if (!mpVisibilityPass) mpVisibilityPass = createComputePass(kVisibilityEntry);
         if (!mpTemporalPass) mpTemporalPass = createComputePass(kTemporalEntry);
         if (!mpSpatialPass) mpSpatialPass = createComputePass(kSpatialEntry);
@@ -429,8 +426,7 @@ namespace Falcor
 
         if (mResetHistory || mFrameIndex == 0)
         {
-            bindCommonVars(mpClearReservoirPass, 0x0BADF00Du, mpPrevReservoirBuffer, mpPrevReservoirBuffer);
-            mpClearReservoirPass->execute(pRenderContext, mReservoirElementCount, 1);
+            pRenderContext->clearUAV(mpPrevReservoirBuffer->getUAV().get(), uint4(0u));
             mResetHistory = false;
         }
 

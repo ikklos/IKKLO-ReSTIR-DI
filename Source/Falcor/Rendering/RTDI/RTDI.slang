@@ -92,7 +92,7 @@ struct RTDI
     void discardReservoirSample(inout Reservoir r, uint channel)
     {
         if (channel >= 3 || channel < 0) return;
-        r.lightID[channel] = -1;
+        r.clearLight(channel);
         r.uv[channel] = float2(0.f, 0.f);
         r.wsum[channel] = 0.f;
     }
@@ -231,7 +231,7 @@ struct RTDI
             if (!RTDI_IsValidReservoir(reservoir, channel)) continue;
 
             PolymorphicLightSample ls;
-            if (samplePolymorphicLight(surf, reservoir.lightID[channel], reservoir.uv[channel], ls))
+            if (samplePolymorphicLight(surf, reservoir.getLightIndex(channel), reservoir.uv[channel], ls))
             {
                 wi[channel] = ls.direction;
                 Li[channel] = ls.Li;
@@ -1089,7 +1089,7 @@ struct RTDI
         for (uint i = 0; i < 3; i++) {
             if (!RTDI_IsValidReservoir(r, i)) continue;
             PolymorphicLightSample ls;
-            if (!samplePolymorphicLight(surf, r.lightID[i], r.uv[i], ls))
+            if (!samplePolymorphicLight(surf, r.getLightIndex(i), r.uv[i], ls))
             {
                 discardReservoirSample(r,i);
                 gReservoir[pixelIndex] = r;
@@ -1254,7 +1254,7 @@ struct RTDI
             Reservoir neighborSample = gPrevReservoir[neighborIndex];
             neighborSample.M = min(neighborSample.M, historyLimit);
             float3 neighborTargetPdf = calcReservoirTargetPdf(surf, neighborSample, pixel);
-            if (all(neighborTargetPdf <= 0.f)) continue;
+            //if (all(neighborTargetPdf <= 0.f)) continue;
 
             RTDI_CombineReservoirs(state, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
         }
@@ -1336,7 +1336,7 @@ struct RTDI
             for (uint channel = 0; channel < 3; ++channel)
             {
                 PolymorphicLightSample ls;
-                if (RTDI_IsValidReservoir(r, channel) && samplePolymorphicLight(surf, r.lightID[channel], r.uv[channel], ls))
+                if (RTDI_IsValidReservoir(r, channel) && samplePolymorphicLight(surf, r.getLightIndex(channel), r.uv[channel], ls))
                 {
                     float tMax = (ls.distance >= FLT_MAX * 0.5f) ? FLT_MAX : max(ls.distance - rayEpsilon, 0.f);
                     SceneRayQuery<1> rayQuery;

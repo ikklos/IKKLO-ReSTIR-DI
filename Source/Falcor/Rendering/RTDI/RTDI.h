@@ -106,7 +106,6 @@ namespace Falcor
         ref<ComputePass> mpUpdateLightsPass;
         ref<ComputePass> mpUpdateEnvLightPass;
         ref<ComputePass> mpInitPass;
-        ref<ComputePass> mpClearReservoirPass;
         ref<ComputePass> mpVisibilityPass;
         ref<ComputePass> mpTemporalPass;
         ref<ComputePass> mpSpatialPass;

@@ -60,5 +60,5 @@ void RTDI_FinalizeResampling(
 /**
  */
 bool RTDI_IsValidReservoir(const Reservoir reservoir, uint channel) {
-    return reservoir.lightID[channel] >= 0;
+    return reservoir.isValid(channel);
 }
