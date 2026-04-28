@@ -91,7 +91,7 @@ struct RTDI
 
     void discardReservoirSample(inout Reservoir r)
     {
-        r.lightID = -1;
+        r.lightID = 0;
         r.sampleUV = float2(0.f, 0.f);
         r.wsum = 0.f;
     }
@@ -1023,7 +1023,7 @@ struct RTDI
         }
 
         PolymorphicLightSample ls;
-        if (!samplePolymorphicLight(surf, r.lightID, r.sampleUV, ls))
+        if (!samplePolymorphicLight(surf, r.getLightIndex(), r.sampleUV, ls))
         {
             discardReservoirSample(r);
             gReservoir[pixelIndex] = r;
@@ -1096,7 +1096,7 @@ struct RTDI
             if (RTDI_IsValidReservoir(prevSample))
             {
                 PolymorphicLightSample ls;
-                if (samplePolymorphicLight(surf, prevSample.lightID, prevSample.sampleUV, true, ls))
+                if (samplePolymorphicLight(surf, prevSample.getLightIndex(), prevSample.sampleUV, true, ls))
                 {
                     currentPdf = calcTargetPdf(surf, ls.direction, ls.Li);
                 }
@@ -1170,7 +1170,7 @@ struct RTDI
             if (RTDI_IsValidReservoir(prevSample))
             {
                 PolymorphicLightSample ls;
-                if (samplePolymorphicLight(surf, prevSample.lightID, prevSample.sampleUV, true, ls))
+                if (samplePolymorphicLight(surf, prevSample.getLightIndex(), prevSample.sampleUV, true, ls))
                 {
                     currentPdf = calcTargetPdf(surf, ls.direction, ls.Li);
                 }
@@ -1209,7 +1209,7 @@ struct RTDI
 
             float neighborTargetPdf = 0.f;
             PolymorphicLightSample candidateLightSample;
-            if (samplePolymorphicLight(surf, neighborSample.lightID, neighborSample.sampleUV, true, candidateLightSample))
+            if (samplePolymorphicLight(surf, neighborSample.getLightIndex(), neighborSample.sampleUV, true, candidateLightSample))
             {
                 neighborTargetPdf = calcTargetPdf(surf, candidateLightSample.direction, candidateLightSample.Li);
             }
@@ -1266,7 +1266,7 @@ struct RTDI
                 continue;
             float neighborTargetPdf = 0.f;
             PolymorphicLightSample candidateLightSample;
-            if (samplePolymorphicLight(centerSurface, neighborSample.lightID, neighborSample.sampleUV, true, candidateLightSample))
+            if (samplePolymorphicLight(centerSurface, neighborSample.getLightIndex(), neighborSample.sampleUV, true, candidateLightSample))
             {
                 neighborTargetPdf = calcTargetPdf(centerSurface, candidateLightSample.direction, candidateLightSample.Li);
             }
@@ -1298,7 +1298,7 @@ struct RTDI
                 return;
             }
             PolymorphicLightSample ls;
-            if (RTDI_IsValidReservoir(r) && samplePolymorphicLight(surf, r.lightID, r.sampleUV, ls)) {
+            if (RTDI_IsValidReservoir(r) && samplePolymorphicLight(surf, r.getLightIndex(), r.sampleUV, ls)) {
                 float tMax = (ls.distance >= FLT_MAX * 0.5f) ? FLT_MAX : max(ls.distance - rayEpsilon, 0.f);
                 SceneRayQuery<1> rayQuery;
                 const Ray ray = Ray(sd.computeRayOrigin(), ls.direction, 0.f, tMax);
