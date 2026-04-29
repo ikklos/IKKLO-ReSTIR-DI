@@ -1486,7 +1486,7 @@ struct RTDI
                 if (selectedSpatialNeighbor.x == int(i)) pi.x = ps.x;
                 if (selectedSpatialNeighbor.y == int(i)) pi.y = ps.y;
                 if (selectedSpatialNeighbor.z == int(i)) pi.z = ps.z;
-                piSum += select(selectedFromPrevious, ps * normNeighborSample.M, 0.f);
+                piSum += ps * normNeighborSample.M;
             }
 
             finalizeBasicBiasCorrection(state, pi, piSum);
