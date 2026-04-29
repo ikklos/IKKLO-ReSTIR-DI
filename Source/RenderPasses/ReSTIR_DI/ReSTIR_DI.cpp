@@ -45,6 +45,8 @@ const char kLocalRISSampleCount[] = "localRisSampleCount";
 const char kInfiniteRISSampleCount[] = "infiniteRisSampleCount";
 const char kEnvRISSampleCount[] = "envRisSampleCount";
 const char kBrdfRISSampleCount[] = "brdfRisSampleCount";
+const char kBiasCorrection[] = "biasCorrection";
+const char kEnableRcvEstimator[] = "enableRcvEstimator";
 const char kEnableTemporalReuse[] = "enableTemporalReuse";
 const char kEnableSpatialReuse[] = "enableSpatialReuse";
 const char kSpatialReuseCount[] = "spatialReuseCount";
@@ -73,6 +75,10 @@ ReSTIR_DI::ReSTIR_DI(ref<Device> pDevice, const Properties& props) : RenderPass(
             mOptions.envRisSampleCount = value;
         else if (key == kBrdfRISSampleCount)
             mOptions.brdfRisSampleCount = value;
+        else if (key == kBiasCorrection)
+            mOptions.biasCorrection = value;
+        else if (key == kEnableRcvEstimator)
+            mOptions.enableRcvEstimator = value;
         else if (key == kEnableTemporalReuse)
             mOptions.enableTemporalReuse = value;
         else if (key == kEnableSpatialReuse)
@@ -123,6 +129,8 @@ Properties ReSTIR_DI::getProperties() const
     props[kInfiniteRISSampleCount] = mOptions.infiniteRisSampleCount;
     props[kEnvRISSampleCount] = mOptions.envRisSampleCount;
     props[kBrdfRISSampleCount] = mOptions.brdfRisSampleCount;
+    props[kBiasCorrection] = mOptions.biasCorrection;
+    props[kEnableRcvEstimator] = mOptions.enableRcvEstimator;
     props[kEnableTemporalReuse] = mOptions.enableTemporalReuse;
     props[kEnableSpatialReuse] = mOptions.enableSpatialReuse;
     props[kSpatialReuseCount] = mOptions.spatialReuseCount;
@@ -189,6 +197,8 @@ void ReSTIR_DI::renderUI(Gui::Widgets& widget)
     dirty |= widget.var("Infinite RIS M", mOptions.infiniteRisSampleCount, 0u, 64u);
     dirty |= widget.var("Env RIS M", mOptions.envRisSampleCount, 0u, 64u);
     dirty |= widget.var("BRDF RIS M", mOptions.brdfRisSampleCount, 0u, 64u);
+    dirty |= widget.dropdown("Bias correction", mOptions.biasCorrection);
+    dirty |= widget.checkbox("Enable RCV", mOptions.enableRcvEstimator);
     dirty |= widget.checkbox("Enable Temporal Reuse", mOptions.enableTemporalReuse);
     dirty |= widget.checkbox("Enable Spatial Reuse", mOptions.enableSpatialReuse);
     dirty |= widget.var("Spatial Reuse times", mOptions.spatialReuseCount, 1u, 5u);
