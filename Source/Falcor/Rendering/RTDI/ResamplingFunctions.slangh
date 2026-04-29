@@ -20,7 +20,7 @@ bool3 RTDI_CombineReservoirsInternal(
     float random,
     float3 targetP,
     float3 sampleNormalization,
-    float3 sampleM
+    float sampleM
 ) {
     bool3 res = bool3(false);
     float3 risWeight = targetP * sampleNormalization;
@@ -51,7 +51,7 @@ bool3 RTDI_CombineReservoirsInternal(
 void RTDI_FinalizeResampling(
     inout Reservoir reservoir,
     float normalizationNumerator,
-    float3 normalizationDenominator
+    float normalizationDenominator
 ) {
     float3 denominator = reservoir.targetPdf * normalizationDenominator;
 

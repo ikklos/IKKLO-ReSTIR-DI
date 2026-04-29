@@ -65,6 +65,7 @@ struct RTDI
     StructuredBuffer<PackedPolymorphicLight> gLightInfo;
     RWStructuredBuffer<PackedSurfaceData> surfaceData;
     RWStructuredBuffer<float4> gRcvDenominator;
+    RWStructuredBuffer<float4> gRcvNumerator;
 
     RWStructuredBuffer<uint2> gPresampledLightIndex;
     RWStructuredBuffer<uint2> gPresampledEnvData;
@@ -104,7 +105,6 @@ struct RTDI
         r.uv[channel] = float2(0.f, 0.f);
         r.wsum[channel] = 0.f;
         r.targetPdf[channel] = 0.f;
-        r.M[channel] = 0.f;
     }
 
     bool reservoirHasUnifiedSample(Reservoir r)
@@ -857,7 +857,7 @@ struct RTDI
             r.update(lightID, uv, w, ph, 1.f, randomState);
         }
 
-        if (any(r.M > 0.f) && any(r.targetPdf > 0.f))
+        if (r.M > 0.f && any(r.targetPdf > 0.f))
         {
             float denom = max(normalizationDenominator, 1e-6f);
             r.wsum = r.wsum / max(r.targetPdf * denom, 1e-6f);
@@ -866,7 +866,7 @@ struct RTDI
         {
             r.wsum = 0.f;
         }
-        r.M = select(r.targetPdf > 0.f, 1.f, 0.f);
+        r.M = 1.f;
         return r;
     }
 
@@ -899,7 +899,7 @@ struct RTDI
         }
 
         RTDI_FinalizeResampling(r, 1.0f, max(r.M, 1.f));
-        r.M = (sampleCount > 0u) ? select(r.targetPdf > 0.f, 1.f, 0.f) : 0.f;
+        r.M = (sampleCount > 0u) ? 1.f : 0.f;
         return r;
     }
 
@@ -953,7 +953,7 @@ struct RTDI
             r.update(int(envLightIndex), uv, w, ph, 1.f, randomState);
         }
 
-        if (any(r.M > 0.f) && any(r.targetPdf > 0.f))
+        if (r.M > 0.f && any(r.targetPdf > 0.f))
         {
             float denom = max(normalizationDenominator, 1e-6f);
             r.wsum = r.wsum / max(r.targetPdf * denom, 1e-6f);
@@ -962,7 +962,7 @@ struct RTDI
         {
             r.wsum = 0.f;
         }
-        r.M = select(r.targetPdf > 0.f, 1.f, 0.f);
+        r.M = 1.f;
         return r;
     }
 
@@ -1037,7 +1037,7 @@ struct RTDI
             r.update(lightID, uv, w, targetPdf, 1.f, randomState);
         }
 
-        if (any(r.M > 0.f) && any(r.targetPdf > 0.f))
+        if (r.M > 0.f && any(r.targetPdf > 0.f))
         {
             float denom = max(normalizationDenominator, 1e-6f);
             r.wsum = r.wsum / max(r.targetPdf * denom, 1e-6f);
@@ -1046,7 +1046,7 @@ struct RTDI
         {
             r.wsum = 0.f;
         }
-        r.M = select(r.targetPdf > 0.f, 1.f, 0.f);
+        r.M = 1.f;
         return r;
     }
 
@@ -1170,6 +1170,7 @@ struct RTDI
         bool validSurface = buildSurfaceData(pixel, surf);
         surfaceData[getSurfaceIndex(pixel, currentSurfaceBufferIndex)] = surf.pack();
         gRcvDenominator[pixelIndex] = 0.f;
+        gRcvNumerator[pixelIndex] = 0.f;
 
         RH_RandomSamplerState randomState = RH_InitRandomState(pixel, gFrameIndex, 0);
         RH_RandomSamplerState coherentState = RH_InitRandomState(pixel / 16u, gFrameIndex, 4);
@@ -1198,8 +1199,7 @@ struct RTDI
         RTDI_CombineReservoirs(r, envReservoir, RH_GetNextRandom(randomState), envReservoir.targetPdf);
         RTDI_CombineReservoirs(r, brdfReservoir, RH_GetNextRandom(randomState), brdfReservoir.targetPdf);
         RTDI_FinalizeResampling(r, 1.0f, 1.0f);
-        bool3 validM = (localReservoir.M > 0.f) || (infiniteReservoir.M > 0.f) || (envReservoir.M > 0.f) || (brdfReservoir.M > 0.f);
-        r.M = select(validM, 1.f, 0.f);
+        r.M = (localReservoir.M > 0.f || infiniteReservoir.M > 0.f || envReservoir.M > 0.f || brdfReservoir.M > 0.f) ? 1.f : 0.f;
 
         gReservoir[pixelIndex] = r;
     }
@@ -1256,7 +1256,7 @@ struct RTDI
 
         Reservoir state = Reservoir();
         RTDI_CombineReservoirs(state, baseR, 0.5f, baseR.targetPdf);
-        float3 historyLimit = min(float3(RTDI_ReservoirMaxM), maxHistoryLength * baseR.M);
+        uint historyLimit = min(RTDI_ReservoirMaxM, maxHistoryLength * baseR.M);
 
         int2 prevPixel = getPrevPixel(pixel, randomState);
         int2 spatialOffset = int2(0, 0);
@@ -1297,7 +1297,7 @@ struct RTDI
 
         if (useBasicBiasCorrection())
         {
-            float3 supportCount = select(state.targetPdf > 0.f, baseR.M, 0.f);
+            float3 supportCount = state.targetPdf > 0.f ? baseR.M : 0.f;
             if (findNeighbor)
             {
                 uint normPrevPixelIndex = uint(prevPixel.y) * gFrameDim.x + uint(prevPixel.x);
@@ -1335,13 +1335,15 @@ struct RTDI
         Reservoir state = Reservoir();
         RTDI_CombineReservoirs(state, baseR, 0.5f, baseR.targetPdf);
         float3 rcvDenominator = 0.f;
+        float3 rcvNumerator = 0.f;
         if (useRcvEstimator != 0u)
         {
             float3 baseBSDFpdf = calcReservoirHelperPdf(surf, baseR);
-            rcvDenominator += baseBSDFpdf * baseR.M;
+            rcvDenominator += baseBSDFpdf * baseR.wsum;
+            rcvNumerator += calcReservoirTargetPdf(surf, baseR, pixel) * baseR.wsum;
         }
 
-        float3 historyLimit = min(float3(RTDI_ReservoirMaxM), maxHistoryLength * baseR.M);
+        uint historyLimit = min(RTDI_ReservoirMaxM, maxHistoryLength * baseR.M);
 
         int2 reprojectedPixel = getPrevPixel(pixel, rng);
         float3 motion = float3(mvec[pixel], 0.f); // TODO handle linear z
@@ -1382,7 +1384,11 @@ struct RTDI
             prevSample.M = min(prevSample.M, historyLimit);
             float3 currentPdf = calcReservoirTargetPdf(surf, prevSample, pixel);
             float3 helperPdf = calcReservoirHelperPdf(surf, prevSample);
-            if (useRcvEstimator != 0u) rcvDenominator += helperPdf * prevSample.M;
+            if (useRcvEstimator != 0u)
+            {
+                rcvDenominator += helperPdf * prevSample.wsum;
+                rcvNumerator += currentPdf * prevSample.wsum;
+            }
             RTDI_CombineReservoirs(state, prevSample, RH_GetNextRandom(rng), currentPdf);
         }
 
@@ -1415,17 +1421,22 @@ struct RTDI
             float3 neighborTargetPdf = calcReservoirTargetPdf(surf, neighborSample, pixel);
             // if (all(neighborTargetPdf <= 0.f)) continue;
             float3 helperPdf = calcReservoirHelperPdf(surf, neighborSample);
-            if (useRcvEstimator != 0u) rcvDenominator += helperPdf * neighborSample.M;
+            if (useRcvEstimator != 0u)
+            {
+                rcvDenominator += helperPdf * neighborSample.wsum;
+                rcvNumerator += neighborTargetPdf * neighborSample.wsum;
+            }
 
             cachedSpatialResult |= (1u << i);
             RTDI_CombineReservoirs(state, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
         }
 
         gRcvDenominator[pixelIndex] = float4(rcvDenominator, 0.f);
+        gRcvNumerator[pixelIndex] = float4(rcvNumerator, 0.f);
 
         if (useBasicBiasCorrection())
         {
-            float3 supportCount = select(state.targetPdf > 0.f, baseR.M, 0.f);
+            float3 supportCount = state.targetPdf > 0.f ? baseR.M : 0.f;
 
             if (foundTemporalSurface)
             {
@@ -1513,7 +1524,7 @@ struct RTDI
         }
         if (useBasicBiasCorrection())
         {
-            float3 supportCount = select(state.targetPdf > 0.f, centerSample.M, 0.f);
+            float3 supportCount = state.targetPdf > 0.f ? centerSample.M : 0.f;
 
             for (uint i = 0; i < numSpatialSamples; ++i)
             {
@@ -1557,41 +1568,70 @@ struct RTDI
             let mi = gScene.materials.getMaterialInstance(sd, lod, hints);
             float3 illumination = {};
             float3 rcvDenominator = gRcvDenominator[pixelIndex].xyz;
-            float scalarM = max(r.M.x, max(r.M.y, r.M.z));
+            float3 rcvNumerator = gRcvNumerator[pixelIndex].xyz;
             if (!validSurface)
             {
                 color[pixel] = float4(0,0,0,1);
                 return;
             }
-            float3 helperPdf = (useRcvEstimator != 0u) ? calcReservoirHelperPdf(surf, r) : 0.f;
+            bool visibleSample[3] = { false, false, false };
+            float3 sampleContribution[3] = { 0.f, 0.f, 0.f };
+
             [unroll]
-            for (uint channel = 0; channel < 3; ++channel)
+            for (uint sourceChannel = 0; sourceChannel < 3; ++sourceChannel)
             {
                 PolymorphicLightSample ls;
-                if (RTDI_IsValidReservoir(r, channel) && samplePolymorphicLight(surf, r.getLightIndex(channel), r.uv[channel], ls))
+                if (RTDI_IsValidReservoir(r, sourceChannel) && samplePolymorphicLight(surf, r.getLightIndex(sourceChannel), r.uv[sourceChannel], ls))
                 {
-                    float tMax = (ls.distance >= FLT_MAX * 0.5f) ? FLT_MAX : max(ls.distance - rayEpsilon, 0.f);
-                    SceneRayQuery<1> rayQuery;
-                    const Ray ray = Ray(sd.computeRayOrigin(), ls.direction, 0.f, tMax);
-                    if (rayQuery.traceVisibilityRay(ray))
+                    if (useRcvEstimator != 0u && rcvDenominator[sourceChannel] > 0.f)
                     {
-                        TinyUniformSampleGenerator sg = TinyUniformSampleGenerator(pixel, gFrameIndex);
-                        sd.mtl.setActiveLobes((uint)LobeType::DiffuseReflection);
-                        float3 diffuse = mi.eval(sd, ls.direction, sg) * ls.Li;
-                        sd.mtl.setActiveLobes((uint)LobeType::SpecularReflection);
-                        float3 specular = mi.eval(sd, ls.direction, sg) * ls.Li;
-                        float fj = diffuse[channel] + specular[channel];
-                        if (useRcvEstimator != 0u && helperPdf[channel] > 0.f && rcvDenominator[channel] > 0.f)
+                        sampleContribution[sourceChannel][sourceChannel] = rcvNumerator[sourceChannel] / rcvDenominator[sourceChannel];
+                        visibleSample[sourceChannel] = true;
+                    }
+                    else
+                    {
+                        float tMax = (ls.distance >= FLT_MAX * 0.5f) ? FLT_MAX : max(ls.distance - rayEpsilon, 0.f);
+                        SceneRayQuery<1> rayQuery;
+                        const Ray ray = Ray(sd.computeRayOrigin(), ls.direction, 0.f, tMax);
+                        if (rayQuery.traceVisibilityRay(ray))
                         {
-                            float Wj = (r.targetPdf[channel] / helperPdf[channel]) * r.M[channel];
-                            illumination[channel] = r.M[channel] * fj * r.wsum[channel] / rcvDenominator[channel];
-                        }
-                        else
-                        {
-                            illumination[channel] = fj * r.wsum[channel];
+                            TinyUniformSampleGenerator sg = TinyUniformSampleGenerator(pixel, gFrameIndex);
+                            sd.mtl.setActiveLobes((uint)LobeType::DiffuseReflection);
+                            float3 diffuseBsdf = mi.eval(sd, ls.direction, sg);
+                            sd.mtl.setActiveLobes((uint)LobeType::SpecularReflection);
+                            float3 specularBsdf = mi.eval(sd, ls.direction, sg);
+                            sampleContribution[sourceChannel] = (diffuseBsdf + specularBsdf) * ls.Li * r.wsum[sourceChannel];
+                            visibleSample[sourceChannel] = true;
                         }
                     }
                 }
+            }
+            [unroll]
+            for (uint channel = 0; channel < 3; ++channel)
+            {
+                if (visibleSample[channel])
+                {
+                    illumination[channel] = sampleContribution[channel][channel];
+                    continue;
+                }
+
+                float bestContribution = 0.f;
+                bool hasFallback = false;
+
+                [unroll]
+                for (uint sourceChannel = 0; sourceChannel < 3; ++sourceChannel)
+                {
+                    if (!visibleSample[sourceChannel]) continue;
+
+                    float candidateContribution = sampleContribution[sourceChannel][channel];
+                    if (!hasFallback || candidateContribution > bestContribution)
+                    {
+                        bestContribution = candidateContribution;
+                        hasFallback = true;
+                    }
+                }
+
+                illumination[channel] = hasFallback ? bestContribution : 0.f;
             }
             let props = mi.getProperties(sd);
             color[pixel] = float4(illumination + props.emission, 1);

@@ -133,17 +133,19 @@ namespace Falcor
     void RTDI::prepareBuffers(const ShaderVar& rootVar)
     {
         const uint32_t pixelCount = mFrameDim.x * mFrameDim.y;
-        if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer || !mpSurfaceDataBuffer || !mpRcvDenominatorBuffer)
+        if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer || !mpSurfaceDataBuffer || !mpRcvDenominatorBuffer || !mpRcvNumeratorBuffer)
         {
             mReservoirElementCount = pixelCount;
             mpReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gReservoir"], mReservoirElementCount);
             mpPrevReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gPrevReservoir"], mReservoirElementCount);
             mpSurfaceDataBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["surfaceData"], 2 * mReservoirElementCount);
             mpRcvDenominatorBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gRcvDenominator"], mReservoirElementCount);
+            mpRcvNumeratorBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gRcvNumerator"], mReservoirElementCount);
             mpReservoirBuffer->setName("RTDI::Reservoir");
             mpPrevReservoirBuffer->setName("RTDI::PrevReservoir");
             mpSurfaceDataBuffer->setName("RTDI::SurfaceData");
             mpRcvDenominatorBuffer->setName("RTDI::RcvDenominator");
+            mpRcvNumeratorBuffer->setName("RTDI::RcvNumerator");
             mResetHistory = true;
         }
 
@@ -388,6 +390,7 @@ namespace Falcor
             var["gLightInfo"] = mpLightInfoBuffer;
             var["surfaceData"] = mpSurfaceDataBuffer;
             var["gRcvDenominator"] = mpRcvDenominatorBuffer;
+            var["gRcvNumerator"] = mpRcvNumeratorBuffer;
             var["gPresampledLightIndex"] = mpPresampledLightIndexBuffer;
             var["gPresampledEnvData"] = mpPresampledEnvDataBuffer;
             var["vbuffer"] = pVBuffer;

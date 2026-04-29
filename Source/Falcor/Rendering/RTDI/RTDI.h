@@ -131,6 +131,7 @@ namespace Falcor
         ref<Buffer> mpAnalyticLightIDBuffer;
         ref<Buffer> mpSurfaceDataBuffer;
         ref<Buffer> mpRcvDenominatorBuffer;
+        ref<Buffer> mpRcvNumeratorBuffer;
         ref<Buffer> mpPresampledLightIndexBuffer;
         ref<Buffer> mpPresampledEnvDataBuffer;
         ref<Buffer> mpNeighborOffsetBuffer;
