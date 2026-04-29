@@ -229,7 +229,7 @@ struct RTDI
         return fullBRDF * max(Li, 0.f);
     }
 
-    float calcApproxTargetFactor(RTAB_Surface surf, float3 wi)
+    float calcSurfaceTargetFactor(RTAB_Surface surf, float3 wi)
     {
         if (!surf.valid) return 0.f;
 
@@ -254,9 +254,9 @@ struct RTDI
         return max(0.f, lerp(specularBRDF, diffuseBRDF, surf.diffuseProb));
     }
 
-    float3 calcTargetPdfApprox(RTAB_Surface surf, float3 wi, float3 Li)
+    float3 calcSurfaceTargetPdf(RTAB_Surface surf, float3 wi, float3 Li)
     {
-        float factor = calcApproxTargetFactor(surf, wi);
+        float factor = calcSurfaceTargetFactor(surf, wi);
         return factor * max(Li, 0.f);
     }
     //3 lights to 3 targetpdf
@@ -287,7 +287,7 @@ struct RTDI
         return fullBRDF * max(float3(Li[0][0], Li[1][1], Li[2][2]), 0.f);
     }
 
-    float3 calcTargetPdfApprox(RTAB_Surface surf, float3 wi[3], float3 Li[3])
+    float3 calcSurfaceTargetPdf(RTAB_Surface surf, float3 wi[3], float3 Li[3])
     {
         float3 targetPdf = 0.f;
 
@@ -295,7 +295,7 @@ struct RTDI
         for (uint channel = 0; channel < 3; ++channel)
         {
             if (all(wi[channel] == 0.f)) continue;
-            targetPdf[channel] = calcApproxTargetFactor(surf, wi[channel]) * max(Li[channel][channel], 0.f);
+            targetPdf[channel] = calcSurfaceTargetFactor(surf, wi[channel]) * max(Li[channel][channel], 0.f);
         }
 
         return targetPdf;
@@ -324,7 +324,7 @@ struct RTDI
         return hasValidChannel ? calcTargetPdf(surf, wi, Li, pixel) : float3(0.f);
     }
 
-    float3 calcReservoirTargetPdfApprox(RTAB_Surface surf, Reservoir reservoir)
+    float3 calcReservoirSurfaceTargetPdf(RTAB_Surface surf, Reservoir reservoir)
     {
         float3 wi[3] = {};
         float3 Li[3] = {};
@@ -344,7 +344,7 @@ struct RTDI
             }
         }
 
-        return hasValidChannel ? calcTargetPdfApprox(surf, wi, Li) : float3(0.f);
+        return hasValidChannel ? calcSurfaceTargetPdf(surf, wi, Li) : float3(0.f);
     }
 
     float3 calcReservoirHelperPdf(RTAB_Surface surf, Reservoir reservoir)
@@ -366,10 +366,15 @@ struct RTDI
         return helperPdf;
     }
 
-    void finalizeBasicBiasCorrection(inout Reservoir reservoir, float3 supportCount)
+    void finalizeBasicBiasCorrection(inout Reservoir reservoir, float3 normalizationNumerator, float3 normalizationDenominator)
     {
-        float3 denominator = reservoir.targetPdf * supportCount;
-        reservoir.wsum = select(denominator <= 0.f, 0.f, reservoir.wsum / max(denominator, 1e-6f));
+        float3 denominator = reservoir.targetPdf * normalizationDenominator;
+        bool3 invalid = (denominator <= 0.f) | (normalizationNumerator <= 0.f);
+        reservoir.wsum = select(
+            invalid,
+            0.f,
+            (reservoir.wsum * normalizationNumerator) / max(denominator, 1e-6f)
+        );
     }
 
     float3 worldToTangent(RTAB_Surface surface, float3 w)
@@ -1287,27 +1292,31 @@ struct RTDI
             break;
         }
 
+        bool3 selectedPrevSample = false;
         if (findNeighbor) {
             uint prevPixelIndex = uint(prevPixel.y) * gFrameDim.x + uint(prevPixel.x);
             Reservoir prevSample = gPrevReservoir[prevPixelIndex];
             prevSample.M = min(prevSample.M, historyLimit);
             float3 currentPdf = calcReservoirTargetPdf(surf, prevSample, pixel);
-            RTDI_CombineReservoirs(state, prevSample, RH_GetNextRandom(randomState), currentPdf);
+            selectedPrevSample = RTDI_CombineReservoirs(state, prevSample, RH_GetNextRandom(randomState), currentPdf);
         }
 
         if (useBasicBiasCorrection())
         {
-            float3 supportCount = state.targetPdf > 0.f ? baseR.M : 0.f;
+            float3 pi = state.targetPdf;
+            float3 piSum = state.targetPdf * baseR.M;
+
             if (findNeighbor)
             {
                 uint normPrevPixelIndex = uint(prevPixel.y) * gFrameDim.x + uint(prevPixel.x);
                 Reservoir normPrevSample = gPrevReservoir[normPrevPixelIndex];
                 normPrevSample.M = min(normPrevSample.M, historyLimit);
-                float3 supportTargetPdf = calcReservoirTargetPdfApprox(tempSurface, state);
-                supportCount += select(supportTargetPdf > 0.f, normPrevSample.M, 0.f);
+                float3 temporalP = calcReservoirSurfaceTargetPdf(tempSurface, state);
+                pi = select(selectedPrevSample, temporalP, pi);
+                piSum += temporalP * normPrevSample.M;
             }
 
-            finalizeBasicBiasCorrection(state, supportCount);
+            finalizeBasicBiasCorrection(state, pi, piSum);
         }
         else
         {
@@ -1377,6 +1386,7 @@ struct RTDI
             break;
         }
 
+        bool3 temporalSelected = false;
         if (foundTemporalSurface)
         {
             uint temporalPixelIndex = uint(matchedTemporalPixel.y) * gFrameDim.x + uint(matchedTemporalPixel.x);
@@ -1389,13 +1399,14 @@ struct RTDI
                 rcvDenominator += helperPdf * prevSample.wsum;
                 rcvNumerator += currentPdf * prevSample.wsum;
             }
-            RTDI_CombineReservoirs(state, prevSample, RH_GetNextRandom(rng), currentPdf);
+            temporalSelected = RTDI_CombineReservoirs(state, prevSample, RH_GetNextRandom(rng), currentPdf);
         }
 
         uint numSpatialSamples = min(numSamples, 31u);
         uint startIdx = uint(RH_GetNextRandom(rng) * float(gNeighborOffsetMask));
         RTAB_Surface neighborSurface;
         uint cachedSpatialResult = 0u;
+        int3 selectedSpatialNeighbor = int3(-1, -1, -1);
 
         for (uint i = 0; i < numSpatialSamples; ++i)
         {
@@ -1428,7 +1439,10 @@ struct RTDI
             }
 
             cachedSpatialResult |= (1u << i);
-            RTDI_CombineReservoirs(state, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
+            bool3 selectedNeighbor = RTDI_CombineReservoirs(state, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
+            if (selectedNeighbor.x) selectedSpatialNeighbor.x = int(i);
+            if (selectedNeighbor.y) selectedSpatialNeighbor.y = int(i);
+            if (selectedNeighbor.z) selectedSpatialNeighbor.z = int(i);
         }
 
         gRcvDenominator[pixelIndex] = float4(rcvDenominator, 0.f);
@@ -1436,15 +1450,22 @@ struct RTDI
 
         if (useBasicBiasCorrection())
         {
-            float3 supportCount = state.targetPdf > 0.f ? baseR.M : 0.f;
+            float3 pi = state.targetPdf;
+            float3 piSum = state.targetPdf * baseR.M;
+            bool3 selectedFromPrevious = bool3(
+                temporalSelected.x || selectedSpatialNeighbor.x >= 0,
+                temporalSelected.y || selectedSpatialNeighbor.y >= 0,
+                temporalSelected.z || selectedSpatialNeighbor.z >= 0
+            );
 
             if (foundTemporalSurface)
             {
                 uint normTemporalPixelIndex = uint(matchedTemporalPixel.y) * gFrameDim.x + uint(matchedTemporalPixel.x);
                 Reservoir normPrevSample = gPrevReservoir[normTemporalPixelIndex];
                 normPrevSample.M = min(normPrevSample.M, historyLimit);
-                float3 supportTargetPdf = calcReservoirTargetPdfApprox(temporalSurface, state);
-                supportCount += select(supportTargetPdf > 0.f, normPrevSample.M, 0.f);
+                float3 temporalP = calcReservoirSurfaceTargetPdf(temporalSurface, state);
+                pi = select(temporalSelected, temporalP, pi);
+                piSum += temporalP * normPrevSample.M;
             }
 
             for (uint i = 0; i < numSpatialSamples; ++i)
@@ -1461,11 +1482,14 @@ struct RTDI
                 uint neighborIndex = uint(idx.y) * gFrameDim.x + uint(idx.x);
                 Reservoir normNeighborSample = gPrevReservoir[neighborIndex];
                 normNeighborSample.M = min(normNeighborSample.M, historyLimit);
-                float3 supportTargetPdf = calcReservoirTargetPdfApprox(cachedNeighborSurface, state);
-                supportCount += select(supportTargetPdf > 0.f, normNeighborSample.M, 0.f);
+                float3 ps = calcReservoirSurfaceTargetPdf(cachedNeighborSurface, state);
+                if (selectedSpatialNeighbor.x == int(i)) pi.x = ps.x;
+                if (selectedSpatialNeighbor.y == int(i)) pi.y = ps.y;
+                if (selectedSpatialNeighbor.z == int(i)) pi.z = ps.z;
+                piSum += select(selectedFromPrevious, ps * normNeighborSample.M, 0.f);
             }
 
-            finalizeBasicBiasCorrection(state, supportCount);
+            finalizeBasicBiasCorrection(state, pi, piSum);
         }
         else
         {
@@ -1500,6 +1524,7 @@ struct RTDI
         RTAB_Surface neighborSurface;
         uint startIdx = uint(RH_GetNextRandom(rng) * (float)gNeighborOffsetMask);
         uint cachedSpatialResult = 0u;
+        int3 selectedNeighbor = int3(-1, -1, -1);
         for (i = 0; i < numSpatialSamples; i++) {
             uint sampleIdx = (startIdx + i) & gNeighborOffsetMask;
             int2 spatialOffset = int2(0, 0);
@@ -1520,11 +1545,15 @@ struct RTDI
             float3 neighborTargetPdf = calcReservoirTargetPdf(centerSurface, neighborSample, pixel);
             if (all(neighborTargetPdf <= 0.f)) continue;
             cachedSpatialResult |= (1u << i);
-            RTDI_CombineReservoirs(state, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
+            bool3 selectedThisNeighbor = RTDI_CombineReservoirs(state, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
+            if (selectedThisNeighbor.x) selectedNeighbor.x = i;
+            if (selectedThisNeighbor.y) selectedNeighbor.y = i;
+            if (selectedThisNeighbor.z) selectedNeighbor.z = i;
         }
         if (useBasicBiasCorrection())
         {
-            float3 supportCount = state.targetPdf > 0.f ? centerSample.M : 0.f;
+            float3 pi = state.targetPdf;
+            float3 piSum = state.targetPdf * centerSample.M;
 
             for (uint i = 0; i < numSpatialSamples; ++i)
             {
@@ -1538,11 +1567,14 @@ struct RTDI
 
                 uint neighborIndex = idx.y * gFrameDim.x + idx.x;
                 Reservoir normNeighborSample = gPrevReservoir[neighborIndex];
-                float3 supportTargetPdf = calcReservoirTargetPdfApprox(cachedNeighborSurface, state);
-                supportCount += select(supportTargetPdf > 0.f, normNeighborSample.M, 0.f);
+                float3 ps = calcReservoirTargetPdf(cachedNeighborSurface, state, uint2(idx));
+                if (selectedNeighbor.x == int(i)) pi.x = ps.x;
+                if (selectedNeighbor.y == int(i)) pi.y = ps.y;
+                if (selectedNeighbor.z == int(i)) pi.z = ps.z;
+                piSum += ps * normNeighborSample.M;
             }
 
-            finalizeBasicBiasCorrection(state, supportCount);
+            finalizeBasicBiasCorrection(state, pi, piSum);
         }
         else
         {
