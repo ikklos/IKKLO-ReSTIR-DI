@@ -1,5 +1,4 @@
 import Rendering.RTDI.RTDI;
-import Rendering.RTDI.Reservoir;
 [numthreads(256, 1, 1)]
 void ReSTIR_Presample(uint3 dispatchThreadId : SV_DispatchThreadID)
 {

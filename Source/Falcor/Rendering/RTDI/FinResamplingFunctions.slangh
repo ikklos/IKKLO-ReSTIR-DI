@@ -1,0 +1,74 @@
+import FinReservoir;
+
+bool RTDI_CombineFinReservoirs(
+    inout FinReservoir targetR,
+    FinReservoir newR,
+    float random,
+    float targetP
+)
+{
+    return RTDI_CombineFinReservoirsInternal(
+        targetR,
+        newR,
+        random,
+        targetP,
+        newR.M * newR.wsum,
+        newR.M
+    );
+}
+
+bool RTDI_CombineFinReservoirsInternal(
+    inout FinReservoir targetR,
+    FinReservoir newR,
+    float random,
+    float targetP,
+    float sampleNormalization,
+    float sampleM
+)
+{
+    float risWeight = targetP * sampleNormalization;
+    targetR.M += sampleM;
+    targetR.wsum += risWeight;
+    if (random * targetR.wsum < risWeight)
+    {
+        targetR.lightID = newR.lightID;
+        targetR.uv = newR.uv;
+        targetR.targetPdf = targetP;
+        return true;
+    }
+    return false;
+}
+
+bool RTDI_StreamFinReservoirSample(
+    inout FinReservoir targetR,
+    int lightID,
+    float2 uv,
+    float random,
+    float targetP,
+    float sampleNormalization,
+    float sampleM
+)
+{
+    FinReservoir sample = FinReservoir();
+    sample.setLight(lightID);
+    sample.uv = uv;
+    sample.targetPdf = targetP;
+    sample.wsum = sampleNormalization;
+    sample.M = sampleM;
+    return RTDI_CombineFinReservoirsInternal(targetR, sample, random, targetP, sampleNormalization, sampleM);
+}
+
+void RTDI_FinalizeFinResampling(
+    inout FinReservoir reservoir,
+    float normalizationNumerator,
+    float normalizationDenominator
+)
+{
+    float denominator = reservoir.targetPdf * normalizationDenominator;
+    reservoir.wsum = (denominator == 0.f) ? 0.f : (reservoir.wsum * normalizationNumerator) / denominator;
+}
+
+bool RTDI_IsValidFinReservoir(const FinReservoir reservoir)
+{
+    return reservoir.isValid();
+}
