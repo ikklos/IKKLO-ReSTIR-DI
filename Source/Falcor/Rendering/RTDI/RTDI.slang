@@ -1499,9 +1499,8 @@ struct RTDI
         }
 
         FinReservoir baseR = gReservoir[pixelIndex];
-        Reservoir vectorState = Reservoir();
-        float3 baseTargetPdf = calcFinReservoirRgbTargetPdf(surf, baseR, pixel);
-        streamFinReservoirToVectorReservoir(vectorState, baseR, 0.5f, baseTargetPdf);
+        FinReservoir state = FinReservoir();
+        RTDI_CombineFinReservoirs(state, baseR, 0.5f, baseR.targetPdf);
 
         uint historyLimit = min(RTDI_ReservoirMaxM, maxHistoryLength * baseR.M);
 
@@ -1537,21 +1536,21 @@ struct RTDI
             break;
         }
 
-        bool3 temporalSelected = false;
+        bool temporalSelected = false;
         if (foundTemporalSurface)
         {
             uint temporalPixelIndex = uint(matchedTemporalPixel.y) * gFrameDim.x + uint(matchedTemporalPixel.x);
             FinReservoir prevSample = gPrevReservoir[temporalPixelIndex];
             prevSample.M = min(prevSample.M, historyLimit);
-            float3 currentPdf = calcFinReservoirRgbTargetPdf(surf, prevSample, pixel);
-            temporalSelected = streamFinReservoirToVectorReservoir(vectorState, prevSample, RH_GetNextRandom(rng), currentPdf);
+            float currentPdf = calcFinReservoirTargetPdf(surf, prevSample, pixel);
+            temporalSelected = RTDI_CombineFinReservoirs(state, prevSample, RH_GetNextRandom(rng), currentPdf);
         }
 
         uint numSpatialSamples = min(numSamples, 31u);
         uint startIdx = uint(RH_GetNextRandom(rng) * float(gNeighborOffsetMask));
         RTAB_Surface neighborSurface;
         uint cachedSpatialResult = 0u;
-        int3 selectedSpatialNeighbor = int3(-1, -1, -1);
+        int selectedSpatialNeighbor = -1;
 
         for (uint i = 0; i < numSpatialSamples; ++i)
         {
@@ -1574,27 +1573,25 @@ struct RTDI
             uint neighborIndex = uint(idx.y) * gFrameDim.x + uint(idx.x);
             FinReservoir neighborSample = gPrevReservoir[neighborIndex];
             neighborSample.M = min(neighborSample.M, historyLimit);
-            float3 neighborTargetPdf = calcFinReservoirRgbTargetPdf(surf, neighborSample, pixel);
+            float neighborTargetPdf = calcFinReservoirTargetPdf(surf, neighborSample, pixel);
 
             cachedSpatialResult |= (1u << i);
-            bool3 selectedNeighbor = streamFinReservoirToVectorReservoir(vectorState, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
-            if (selectedNeighbor.x) selectedSpatialNeighbor.x = int(i);
-            if (selectedNeighbor.y) selectedSpatialNeighbor.y = int(i);
-            if (selectedNeighbor.z) selectedSpatialNeighbor.z = int(i);
+            bool selectedNeighbor = RTDI_CombineFinReservoirs(state, neighborSample, RH_GetNextRandom(rng), neighborTargetPdf);
+            if (selectedNeighbor) selectedSpatialNeighbor = int(i);
         }
 
         if (useBasicBiasCorrection())
         {
-            float3 pi = vectorState.targetPdf;
-            float3 piSum = vectorState.targetPdf * baseR.M;
+            float pi = state.targetPdf;
+            float piSum = state.targetPdf * baseR.M;
 
             if (foundTemporalSurface)
             {
                 uint normTemporalPixelIndex = uint(matchedTemporalPixel.y) * gFrameDim.x + uint(matchedTemporalPixel.x);
                 FinReservoir normPrevSample = gPrevReservoir[normTemporalPixelIndex];
                 normPrevSample.M = min(normPrevSample.M, historyLimit);
-                float3 temporalP = calcReservoirRgbSurfaceTargetPdf(temporalSurface, vectorState);
-                pi = select(temporalSelected, temporalP, pi);
+                float temporalP = calcFinReservoirSurfaceTargetPdf(temporalSurface, state);
+                pi = temporalSelected ? temporalP : pi;
                 piSum += temporalP * normPrevSample.M;
             }
 
@@ -1612,21 +1609,19 @@ struct RTDI
                 uint neighborIndex = uint(idx.y) * gFrameDim.x + uint(idx.x);
                 FinReservoir normNeighborSample = gPrevReservoir[neighborIndex];
                 normNeighborSample.M = min(normNeighborSample.M, historyLimit);
-                float3 ps = calcReservoirRgbSurfaceTargetPdf(cachedNeighborSurface, vectorState);
-                if (selectedSpatialNeighbor.x == int(i)) pi.x = ps.x;
-                if (selectedSpatialNeighbor.y == int(i)) pi.y = ps.y;
-                if (selectedSpatialNeighbor.z == int(i)) pi.z = ps.z;
+                float ps = calcFinReservoirSurfaceTargetPdf(cachedNeighborSurface, state);
+                if (selectedSpatialNeighbor == int(i)) pi = ps;
                 piSum += ps * normNeighborSample.M;
             }
 
-            finalizeBasicBiasCorrection(vectorState, pi, piSum);
+            finalizeBasicBiasCorrection(state, pi, piSum);
         }
         else
         {
-            RTDI_FinalizeResampling(vectorState, 1.0f, vectorState.M);
+            RTDI_FinalizeFinResampling(state, 1.0f, state.M);
         }
 
-        gReservoir[pixelIndex] = compressVectorReservoirToFinReservoir(vectorState, rng);
+        gReservoir[pixelIndex] = state;
     }
 
     /** spatial resampling
