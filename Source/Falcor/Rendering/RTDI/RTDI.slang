@@ -426,6 +426,13 @@ struct RTDI
         return max(surfaceBrdfPdf(surf, ls.direction), 0.f);
     }
 
+    float calcFinReservoirProposalPdfApprox(FinReservoir reservoir)
+    {
+        if (!RTDI_IsValidFinReservoir(reservoir)) return 0.f;
+        if (reservoir.wsum <= 0.f) return 0.f;
+        return 1.f / max(reservoir.wsum, 1e-6f);
+    }
+
     void finalizeBasicBiasCorrection(inout FinReservoir reservoir, float normalizationNumerator, float normalizationDenominator)
     {
         float denominator = reservoir.targetPdf * normalizationDenominator;
@@ -467,40 +474,49 @@ struct RTDI
         return result;
     }
 
-    FinReservoir compressVectorReservoirToFinReservoir(Reservoir source, inout RH_RandomSamplerState randomState)
+    FinReservoir compressVectorReservoirToFinReservoir(Reservoir source, RTAB_Surface surf, uint2 pixel, inout RH_RandomSamplerState randomState)
     {
         FinReservoir result = FinReservoir();
-
-        uint validChannelCount = 0u;
-        [unroll]
-        for (uint channel = 0; channel < 3; ++channel)
-        {
-            if (RTDI_IsValidReservoir(source, channel) && source.targetPdf[channel] > 0.f && source.wsum[channel] > 0.f)
-                validChannelCount++;
-        }
-
-        if (validChannelCount == 0u) return result;
-
-        float misWeight = 1.f / float(validChannelCount);
-
+        float pdfApprox[3] = { 0.f, 0.f, 0.f };
+        float pdfSum = 0.f;
         [unroll]
         for (uint channel = 0; channel < 3; ++channel)
         {
             if (!RTDI_IsValidReservoir(source, channel)) continue;
             if (source.targetPdf[channel] <= 0.f || source.wsum[channel] <= 0.f) continue;
 
-            RTDI_StreamFinReservoirSample(
+            pdfApprox[channel] = 1.f / max(source.wsum[channel], 1e-6f);
+            pdfSum += pdfApprox[channel];
+        }
+
+        if (pdfSum <= 0.f) return result;
+        uint selectedC = 0;
+        [unroll]
+        for (uint channel = 0; channel < 3; ++channel)
+        {
+            if (!RTDI_IsValidReservoir(source, channel)) continue;
+            if (source.targetPdf[channel] <= 0.f || source.wsum[channel] <= 0.f) continue;
+
+            PolymorphicLightSample ls;
+            if (!samplePolymorphicLight(surf, source.getLightIndex(channel), source.uv[channel], ls))
+                continue;
+
+            float sampleTarget = scalarizeTargetPdf(calcTargetPdf(surf, ls.direction, ls.Li, pixel));
+            if (sampleTarget <= 0.f) continue;
+
+            bool ret = RTDI_StreamFinReservoirSample(
                 result,
                 source.getLightIndex(channel),
                 source.uv[channel],
                 RH_GetNextRandom(randomState),
-                source.targetPdf[channel],
-                source.wsum[channel] * misWeight,
+                sampleTarget,
+                source.wsum[channel],
                 1.f
             );
+            if (ret) selectedC = channel;
         }
 
-        RTDI_FinalizeFinResampling(result, 1.f, max(result.M, 1.f));
+        RTDI_FinalizeFinResampling(result, pdfApprox[selectedC], pdfSum);
         return result;
     }
 
@@ -1502,6 +1518,8 @@ struct RTDI
         Reservoir vectorState = Reservoir();
         float3 baseTargetPdf = calcFinReservoirRgbTargetPdf(surf, baseR, pixel);
         streamFinReservoirToVectorReservoir(vectorState, baseR, 0.5f, baseTargetPdf);
+        float baseProposalPdf = calcFinReservoirProposalPdfApprox(baseR);
+        float proposalDenominator = baseProposalPdf * baseR.M;
 
         uint historyLimit = min(RTDI_ReservoirMaxM, maxHistoryLength * baseR.M);
 
@@ -1512,6 +1530,7 @@ struct RTDI
         int2 matchedTemporalPixel = int2(0, 0);
         bool foundTemporalSurface = false;
         RTAB_Surface temporalSurface;
+        float temporalProposalPdf = 0.f;
 
         for (int i = 0; i < 9; ++i)
         {
@@ -1543,6 +1562,8 @@ struct RTDI
             uint temporalPixelIndex = uint(matchedTemporalPixel.y) * gFrameDim.x + uint(matchedTemporalPixel.x);
             FinReservoir prevSample = gPrevReservoir[temporalPixelIndex];
             prevSample.M = min(prevSample.M, historyLimit);
+            temporalProposalPdf = calcFinReservoirProposalPdfApprox(prevSample);
+            proposalDenominator += temporalProposalPdf * prevSample.M;
             float3 currentPdf = calcFinReservoirRgbTargetPdf(surf, prevSample, pixel);
             temporalSelected = streamFinReservoirToVectorReservoir(vectorState, prevSample, RH_GetNextRandom(rng), currentPdf);
         }
@@ -1552,6 +1573,7 @@ struct RTDI
         RTAB_Surface neighborSurface;
         uint cachedSpatialResult = 0u;
         int3 selectedSpatialNeighbor = int3(-1, -1, -1);
+        float spatialProposalPdf[31] = {};
 
         for (uint i = 0; i < numSpatialSamples; ++i)
         {
@@ -1574,6 +1596,8 @@ struct RTDI
             uint neighborIndex = uint(idx.y) * gFrameDim.x + uint(idx.x);
             FinReservoir neighborSample = gPrevReservoir[neighborIndex];
             neighborSample.M = min(neighborSample.M, historyLimit);
+            spatialProposalPdf[i] = calcFinReservoirProposalPdfApprox(neighborSample);
+            proposalDenominator += spatialProposalPdf[i] * neighborSample.M;
             float3 neighborTargetPdf = calcFinReservoirRgbTargetPdf(surf, neighborSample, pixel);
 
             cachedSpatialResult |= (1u << i);
@@ -1623,10 +1647,16 @@ struct RTDI
         }
         else
         {
-            RTDI_FinalizeResampling(vectorState, 1.0f, vectorState.M);
+            float3 selectedProposalPdf = baseProposalPdf.xxx;
+            selectedProposalPdf = select(temporalSelected, temporalProposalPdf.xxx, selectedProposalPdf);
+            if (selectedSpatialNeighbor.x >= 0) selectedProposalPdf.x = spatialProposalPdf[selectedSpatialNeighbor.x];
+            if (selectedSpatialNeighbor.y >= 0) selectedProposalPdf.y = spatialProposalPdf[selectedSpatialNeighbor.y];
+            if (selectedSpatialNeighbor.z >= 0) selectedProposalPdf.z = spatialProposalPdf[selectedSpatialNeighbor.z];
+
+            finalizeBasicBiasCorrection(vectorState, selectedProposalPdf, proposalDenominator.xxx);
         }
 
-        gReservoir[pixelIndex] = compressVectorReservoirToFinReservoir(vectorState, rng);
+        gReservoir[pixelIndex] = compressVectorReservoirToFinReservoir(vectorState, surf, pixel, rng);
     }
 
     /** spatial resampling
