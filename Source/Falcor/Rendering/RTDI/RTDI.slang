@@ -1296,7 +1296,14 @@ struct RTDI
     FinReservoir convertReservoirToFinReservoir(RTAB_Surface surf, Reservoir source, inout RH_RandomSamplerState randomState, uint2 pixel)
     {
         FinReservoir result = FinReservoir();
-
+        float proposalPdf[3];
+        float sumPdf = 0;
+        uint selChannel = 0;
+        [unroll]
+        for (uint channel = 0; channel < 3; ++channel) {
+            proposalPdf[channel] = 1 / source.wsum[channel];
+            sumPdf += proposalPdf[channel];
+        }
         [unroll]
         for (uint channel = 0; channel < 3; ++channel)
         {
@@ -1309,7 +1316,7 @@ struct RTDI
             float sampleTarget = scalarizeTargetPdf(calcTargetPdf(surf, ls.direction, ls.Li, pixel));
             if (sampleTarget <= 0.f) continue;
 
-            RTDI_StreamFinReservoirSample(
+            bool sel = RTDI_StreamFinReservoirSample(
                 result,
                 source.getLightIndex(channel),
                 source.uv[channel],
@@ -1318,10 +1325,11 @@ struct RTDI
                 source.wsum[channel],
                 1.f
             );
+            if (sel) selChannel = channel;
         }
 
-        float normalizationDenominator = max(result.M, 1.f);
-        RTDI_FinalizeFinResampling(result, 1.f, normalizationDenominator);
+        float normalizationDenominator = sumPdf;
+        RTDI_FinalizeFinResampling(result, proposalPdf[selChannel], normalizationDenominator);
         return result;
     }
 
