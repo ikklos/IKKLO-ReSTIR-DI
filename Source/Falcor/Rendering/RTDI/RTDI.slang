@@ -482,9 +482,6 @@ struct RTDI
         [unroll]
         for (uint channel = 0; channel < 3; ++channel)
         {
-            if (!RTDI_IsValidReservoir(source, channel)) continue;
-            if (source.targetPdf[channel] <= 0.f || source.wsum[channel] <= 0.f) continue;
-
             pdfApprox[channel] = 1.f / max(source.wsum[channel], 1e-6f);
             pdfSum += pdfApprox[channel];
         }
@@ -494,15 +491,11 @@ struct RTDI
         [unroll]
         for (uint channel = 0; channel < 3; ++channel)
         {
-            if (!RTDI_IsValidReservoir(source, channel)) continue;
-            if (source.targetPdf[channel] <= 0.f || source.wsum[channel] <= 0.f) continue;
-
             PolymorphicLightSample ls;
             if (!samplePolymorphicLight(surf, source.getLightIndex(channel), source.uv[channel], ls))
                 continue;
 
             float sampleTarget = scalarizeTargetPdf(calcTargetPdf(surf, ls.direction, ls.Li, pixel));
-            if (sampleTarget <= 0.f) continue;
 
             bool ret = RTDI_StreamFinReservoirSample(
                 result,
@@ -1518,8 +1511,8 @@ struct RTDI
         Reservoir vectorState = Reservoir();
         float3 baseTargetPdf = calcFinReservoirRgbTargetPdf(surf, baseR, pixel);
         streamFinReservoirToVectorReservoir(vectorState, baseR, 0.5f, baseTargetPdf);
-        float baseProposalPdf = calcFinReservoirProposalPdfApprox(baseR);
-        float proposalDenominator = baseProposalPdf * baseR.M;
+        float baseProposalPdf = calcFinReservoirProposalPdfApprox(baseR) * baseR.M;
+        float proposalDenominator = baseProposalPdf;
 
         uint historyLimit = min(RTDI_ReservoirMaxM, maxHistoryLength * baseR.M);
 
@@ -1562,8 +1555,8 @@ struct RTDI
             uint temporalPixelIndex = uint(matchedTemporalPixel.y) * gFrameDim.x + uint(matchedTemporalPixel.x);
             FinReservoir prevSample = gPrevReservoir[temporalPixelIndex];
             prevSample.M = min(prevSample.M, historyLimit);
-            temporalProposalPdf = calcFinReservoirProposalPdfApprox(prevSample);
-            proposalDenominator += temporalProposalPdf * prevSample.M;
+            temporalProposalPdf = calcFinReservoirProposalPdfApprox(prevSample) * prevSample.M;
+            proposalDenominator += temporalProposalPdf;
             float3 currentPdf = calcFinReservoirRgbTargetPdf(surf, prevSample, pixel);
             temporalSelected = streamFinReservoirToVectorReservoir(vectorState, prevSample, RH_GetNextRandom(rng), currentPdf);
         }
@@ -1596,8 +1589,8 @@ struct RTDI
             uint neighborIndex = uint(idx.y) * gFrameDim.x + uint(idx.x);
             FinReservoir neighborSample = gPrevReservoir[neighborIndex];
             neighborSample.M = min(neighborSample.M, historyLimit);
-            spatialProposalPdf[i] = calcFinReservoirProposalPdfApprox(neighborSample);
-            proposalDenominator += spatialProposalPdf[i] * neighborSample.M;
+            spatialProposalPdf[i] = calcFinReservoirProposalPdfApprox(neighborSample) * neighborSample.M;
+            proposalDenominator += spatialProposalPdf[i];
             float3 neighborTargetPdf = calcFinReservoirRgbTargetPdf(surf, neighborSample, pixel);
 
             cachedSpatialResult |= (1u << i);
@@ -1652,8 +1645,8 @@ struct RTDI
             if (selectedSpatialNeighbor.x >= 0) selectedProposalPdf.x = spatialProposalPdf[selectedSpatialNeighbor.x];
             if (selectedSpatialNeighbor.y >= 0) selectedProposalPdf.y = spatialProposalPdf[selectedSpatialNeighbor.y];
             if (selectedSpatialNeighbor.z >= 0) selectedProposalPdf.z = spatialProposalPdf[selectedSpatialNeighbor.z];
-
-            finalizeBasicBiasCorrection(vectorState, selectedProposalPdf, proposalDenominator.xxx);
+            //finalizeBasicBiasCorrection(vectorState, 1, vectorState.M);
+            finalizeBasicBiasCorrection(vectorState, selectedProposalPdf , proposalDenominator.xxx);
         }
 
         gReservoir[pixelIndex] = compressVectorReservoirToFinReservoir(vectorState, surf, pixel, rng);
