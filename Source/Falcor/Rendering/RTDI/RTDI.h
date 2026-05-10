@@ -39,12 +39,25 @@ namespace Falcor
     class FALCOR_API RTDI
     {
     public:
+        enum class BiasCorrection
+        {
+            Off = 0,   ///< Keep the original 1/M normalization path.
+            Basic = 1, ///< Use MIS-like normalization assuming reused samples are visible.
+        };
+
+        FALCOR_ENUM_INFO(BiasCorrection, {
+            { BiasCorrection::Off, "Off" },
+            { BiasCorrection::Basic, "Basic" },
+        });
+
         struct Options
         {
             uint32_t localRisSampleCount = 24;
             uint32_t infiniteRisSampleCount = 8;
             uint32_t envRisSampleCount = 8;
             uint32_t brdfRisSampleCount = 1;
+            BiasCorrection biasCorrection = BiasCorrection::Off;
+            bool enableRcvEstimator = false;
             bool enableTemporalReuse = true;
             bool enableSpatialReuse = true;
             uint32_t spatialReuseCount = 1;
@@ -117,6 +130,7 @@ namespace Falcor
         ref<Buffer> mpLightInfoBuffer;
         ref<Buffer> mpAnalyticLightIDBuffer;
         ref<Buffer> mpSurfaceDataBuffer;
+        ref<Buffer> mpRcvDenominatorBuffer;
         ref<Buffer> mpPresampledLightIndexBuffer;
         ref<Buffer> mpPresampledEnvDataBuffer;
         ref<Buffer> mpNeighborOffsetBuffer;
@@ -135,4 +149,6 @@ namespace Falcor
         LightRanges mLights;
         Options mOptions;
     };
+
+    FALCOR_ENUM_REGISTER(RTDI::BiasCorrection);
 }
