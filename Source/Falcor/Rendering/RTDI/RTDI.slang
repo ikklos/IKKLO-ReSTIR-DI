@@ -152,71 +152,58 @@ struct RTDI
     /** calculate target pdf at this surf
     *   1 lights to 3 targetPdf
     */
-    float3 calcTargetPdf(RTAB_Surface surf, float3 wi, float3 Li, uint2 pixel)
+    float calcSurfaceTargetFactor(RTAB_Surface surf, float3 wi)
     {
         if (!surf.valid) return 0.f;
 
-        // float3 N = normalize(surf.normal);
-        // float3 V = normalize(surf.viewDir);
-        // float3 L = normalize(wi);
-        // float3 H = normalize(V + L);
+        float3 N = normalize(surf.normal);
+        float3 V = normalize(surf.viewDir);
+        float3 L = normalize(wi);
+        float3 H = normalize(V + L);
 
-        // float NdotV = saturate(dot(N, V));
-        // float NdotL = saturate(dot(N, L));
-        // float NdotH = saturate(dot(N, H));
-        // float LdotH = saturate(dot(L, H));
+        float NdotV = saturate(dot(N, V));
+        float NdotL = saturate(dot(N, L));
+        float NdotH = saturate(dot(N, H));
+        float LdotH = saturate(dot(L, H));
 
-        // float roughness = surf.roughness;
-        // float specular = surf.specular;
-        // float D = evalNdfGGX(roughness * roughness, NdotH);
-        // float G = evalMaskingSmithGGXSeparable(roughness, NdotL, NdotV);
-        // float F = specular < 1e-8f ? 0.f : (evalFresnelSchlick(specular, 1.f, LdotH) / max(specular, 1e-6f));
+        float roughness = surf.roughness;
+        float specular = surf.specular;
+        float D = evalNdfGGX(roughness * roughness, NdotH);
+        float G = evalMaskingSmithGGXSeparable(roughness, NdotL, NdotV);
+        float F = specular < 1e-8f ? 0.f : (evalFresnelSchlick(specular, 1.f, LdotH) / max(specular, 1e-6f));
 
-        // float diffuseBRDF = NdotL * (1.f / PI);
-        // float specularBRDF = (D * G * F) / (4.f * NdotV);
-        // float fullBRDF = max(0.f, lerp(specularBRDF, diffuseBRDF, surf.diffuseProb));
-        ShadingData sd;
-        float3 fullBRDF = {};
+        float diffuseBRDF = NdotL * (1.f / PI);
+        float specularBRDF = (D * G * F) / max(4.f * NdotV, 1e-6f);
+        return max(0.f, lerp(specularBRDF, diffuseBRDF, surf.diffuseProb));
+    }
 
-        if (loadShadingData(pixel, gFrameDim, gScene.camera, vbuffer, sd)) {
-            let lod = ExplicitLodTextureSampler(0.0f);
-            let hints = getMaterialInstanceHints();
-            let mi = gScene.materials.getMaterialInstance(sd, lod, hints);
-            TinyUniformSampleGenerator sg = TinyUniformSampleGenerator(pixel, gFrameIndex);
-            sd.mtl.setActiveLobes((uint)LobeType::DiffuseReflection);
-            float3 diffuse = mi.eval(sd, wi, sg);
-            sd.mtl.setActiveLobes((uint)LobeType::SpecularReflection);
-            float3 specular = mi.eval(sd, wi, sg);
-            fullBRDF = max(0.f, lerp(specular, diffuse, diffuse / max(diffuse + specular, 1e-6f)));
-        }
-        return fullBRDF * max(Li, 0.f);
+    float3 calcSurfaceTargetPdf(RTAB_Surface surf, float3 wi, float3 Li)
+    {
+        float factor = calcSurfaceTargetFactor(surf, wi);
+        return factor * max(Li, 0.f);
+    }
+
+    float3 calcTargetPdf(RTAB_Surface surf, float3 wi, float3 Li, uint2 pixel)
+    {
+        return calcSurfaceTargetPdf(surf, wi, Li);
     }
     //3 lights to 3 targetpdf
-    //TODO: ya suo this
-    float3 calcTargetPdf(RTAB_Surface surf, float3 wi[3], float3 Li[3], uint2 pixel) {
-        ShadingData sd;
-        float3 fullBRDF = {};
+    float3 calcSurfaceTargetPdf(RTAB_Surface surf, float3 wi[3], float3 Li[3])
+    {
+        float3 targetPdf = 0.f;
 
-        if (loadShadingData(pixel, gFrameDim, gScene.camera, vbuffer, sd)) {
-            let lod = ExplicitLodTextureSampler(0.0f);
-            let hints = getMaterialInstanceHints();
-            let mi = gScene.materials.getMaterialInstance(sd, lod, hints);
-            TinyUniformSampleGenerator sg = TinyUniformSampleGenerator(pixel, gFrameIndex);
-            sd.mtl.setActiveLobes((uint)LobeType::DiffuseReflection);
-            float3 diffuse = float3(
-                mi.eval(sd, wi[0], sg).x,
-                mi.eval(sd, wi[1], sg).y,
-                mi.eval(sd, wi[2], sg).z
-            );
-            sd.mtl.setActiveLobes((uint)LobeType::SpecularReflection);
-            float3 specular = float3(
-                mi.eval(sd, wi[0], sg).x,
-                mi.eval(sd, wi[1], sg).y,
-                mi.eval(sd, wi[2], sg).z
-            );
-            fullBRDF = max(0.f, lerp(specular, diffuse, diffuse / max(diffuse + specular, 1e-6f)));
+        [unroll]
+        for (uint channel = 0; channel < 3; ++channel)
+        {
+            if (all(wi[channel] == 0.f)) continue;
+            targetPdf[channel] = calcSurfaceTargetFactor(surf, wi[channel]) * max(Li[channel][channel], 0.f);
         }
-        return fullBRDF * max(float3(Li[0][0], Li[1][1], Li[2][2]), 0.f);
+
+        return targetPdf;
+    }
+
+    float3 calcTargetPdf(RTAB_Surface surf, float3 wi[3], float3 Li[3], uint2 pixel) {
+        return calcSurfaceTargetPdf(surf, wi, Li);
     }
 
     float3 calcReservoirTargetPdf(RTAB_Surface surf, Reservoir reservoir, uint2 pixel)
