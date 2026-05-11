@@ -76,7 +76,6 @@ namespace Falcor
         mOptions.envRisSampleCount = std::min(options.envRisSampleCount, 64u);
         mOptions.brdfRisSampleCount = std::min(options.brdfRisSampleCount, 64u);
         mOptions.biasCorrection = options.biasCorrection;
-        mOptions.enableRcvEstimator = options.enableRcvEstimator;
         mOptions.enableTemporalReuse = options.enableTemporalReuse;
         mOptions.enableSpatialReuse = options.enableSpatialReuse;
         mOptions.spatialReuseCount = std::max(options.spatialReuseCount, 1u);
@@ -133,19 +132,15 @@ namespace Falcor
     void RTDI::prepareBuffers(const ShaderVar& rootVar)
     {
         const uint32_t pixelCount = mFrameDim.x * mFrameDim.y;
-        if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer || !mpSurfaceDataBuffer || !mpRcvDenominatorBuffer || !mpRcvNumeratorBuffer)
+        if (pixelCount != mReservoirElementCount || !mpReservoirBuffer || !mpPrevReservoirBuffer || !mpSurfaceDataBuffer)
         {
             mReservoirElementCount = pixelCount;
             mpReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gReservoir"], mReservoirElementCount);
             mpPrevReservoirBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gPrevReservoir"], mReservoirElementCount);
             mpSurfaceDataBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["surfaceData"], 2 * mReservoirElementCount);
-            mpRcvDenominatorBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gRcvDenominator"], mReservoirElementCount);
-            mpRcvNumeratorBuffer = mpDevice->createStructuredBuffer(rootVar["gRTDI"]["gRcvNumerator"], mReservoirElementCount);
             mpReservoirBuffer->setName("RTDI::Reservoir");
             mpPrevReservoirBuffer->setName("RTDI::PrevReservoir");
             mpSurfaceDataBuffer->setName("RTDI::SurfaceData");
-            mpRcvDenominatorBuffer->setName("RTDI::RcvDenominator");
-            mpRcvNumeratorBuffer->setName("RTDI::RcvNumerator");
             mResetHistory = true;
         }
 
@@ -389,8 +384,6 @@ namespace Falcor
             var["gPrevReservoir"] = pPrevReservoir ? pPrevReservoir : mpPrevReservoirBuffer;
             var["gLightInfo"] = mpLightInfoBuffer;
             var["surfaceData"] = mpSurfaceDataBuffer;
-            var["gRcvDenominator"] = mpRcvDenominatorBuffer;
-            var["gRcvNumerator"] = mpRcvNumeratorBuffer;
             var["gPresampledLightIndex"] = mpPresampledLightIndexBuffer;
             var["gPresampledEnvData"] = mpPresampledEnvDataBuffer;
             var["vbuffer"] = pVBuffer;
@@ -406,7 +399,6 @@ namespace Falcor
             cb["gEnvRIS_M"] = mOptions.envRisSampleCount;
             cb["gBrdfRIS_M"] = mOptions.brdfRisSampleCount;
             cb["biasCorrectionMode"] = uint(mOptions.biasCorrection);
-            cb["useRcvEstimator"] = (mOptions.enableRcvEstimator && mOptions.enableTemporalReuse && mOptions.enableSpatialReuse) ? 1u : 0u;
             cb["gSpatialReuseSampleCount"] = mOptions.spatialReuseSampleCount;
             cb["gPresampledTileCount"] = mOptions.presampledTileCount;
             cb["gPresampledTileSize"] = mOptions.presampledTileSize;

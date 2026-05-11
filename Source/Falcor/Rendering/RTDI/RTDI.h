@@ -57,7 +57,6 @@ namespace Falcor
             uint32_t envRisSampleCount = 8;
             uint32_t brdfRisSampleCount = 1;
             BiasCorrection biasCorrection = BiasCorrection::Off;
-            bool enableRcvEstimator = false;
             bool enableTemporalReuse = true;
             bool enableSpatialReuse = true;
             uint32_t spatialReuseCount = 1;
@@ -130,8 +129,6 @@ namespace Falcor
         ref<Buffer> mpLightInfoBuffer;
         ref<Buffer> mpAnalyticLightIDBuffer;
         ref<Buffer> mpSurfaceDataBuffer;
-        ref<Buffer> mpRcvDenominatorBuffer;
-        ref<Buffer> mpRcvNumeratorBuffer;
         ref<Buffer> mpPresampledLightIndexBuffer;
         ref<Buffer> mpPresampledEnvDataBuffer;
         ref<Buffer> mpNeighborOffsetBuffer;
